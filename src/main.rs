@@ -1,21 +1,35 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use clap::{App, AppSettings, Arg};
 use crate::arch::Bus;
 use crate::arch::cpu::Cpu;
-use crate::arch::tia::Tia;
 use crate::util::InfCell;
 
 mod arch;
 mod util;
 
 fn main() {
+    let matches = App::new("Rustari2600")
+        .arg(Arg::new("rom")
+            .required(true)
+            .takes_value(true))
+        .setting(AppSettings::NextLineHelp)
+        .setting(AppSettings::ArgRequiredElseHelp)
+        .setting(AppSettings::DeriveDisplayOrder)
+        .get_matches();
+    
     let bus_cell = InfCell::new(Bus::default());
     let bus = bus_cell.get_mut();
     let bus_ref = bus_cell.get_mut();
     
+    bus.tia.cpu_counter = 0;
+    bus.cart.set_rom(&std::fs::read(PathBuf::from(matches.value_of("rom").unwrap())).unwrap());
+    bus.cpu.init_pc(bus_ref);
+    
     loop {
         let start = Instant::now();
         for _ in 0..3584160 {
-            bus.tia.cycle(bus_ref);
+            bus.tia.cycle(&bus_cell);
         }
         
         let elapsed = start.elapsed();

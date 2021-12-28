@@ -1,13 +1,16 @@
-use std::intrinsics::atomic_nand;
+#![allow(unused_variables)]
+#![allow(non_upper_case_globals)]
+
+use std::fmt::{Debug, Formatter};
 use std::num::Wrapping;
 use crate::arch::BusAccessable;
-use crate::Bus;
+use crate::{Bus, InfCell};
 use bitflags::bitflags;
 
 
 
 bitflags! {
-    pub struct StatusFlags: u8 {
+    pub struct StatusReg: u8 {
         const Negative          = 0b10000000;
         const Overflow          = 0b01000000;
         const Unused            = 0b00100000;
@@ -18,13 +21,30 @@ bitflags! {
         const Carry             = 0b00000001;
     }
 }
-impl Default for StatusFlags {
+impl Default for StatusReg {
     fn default() -> Self {
-        StatusFlags::Unused | StatusFlags::Break
+        StatusReg::Unused | StatusReg::Break
+    }
+}
+impl std::fmt::Display for StatusReg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut s = String::new();
+        if self.intersects(StatusReg::Negative)           { s.push('N') } else { s.push('n') }
+        if self.intersects(StatusReg::Overflow)           { s.push('V') } else { s.push('v') }
+        s.push('-');
+        if self.intersects(StatusReg::Break)              { s.push('B') } else { s.push('b') }
+        if self.intersects(StatusReg::Decimal)            { s.push('D') } else { s.push('d') }
+        if self.intersects(StatusReg::InterruptDisable)   { s.push('I') } else { s.push('i') }
+        if self.intersects(StatusReg::Zero)               { s.push('Z') } else { s.push('z') }
+        if self.intersects(StatusReg::Carry)              { s.push('C') } else { s.push('c') }
+        
+        write!(f, "{}", s)
     }
 }
 
 
+
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AddrMode {
     Accumulator,
     Absolute,
@@ -39,6 +59,46 @@ pub enum AddrMode {
     Zero,
     ZeroX,
     ZeroY,
+    Auto, // mode is automatically handled by instruction (e.g. some instructions can only be used in one mode)
+}
+use AddrMode::*;
+
+
+#[derive(Copy, Clone)]
+pub struct InstructionProcedure {
+    pub done: bool,
+    func: fn(&mut Self, &mut Cpu, &mut Bus),
+    mode: AddrMode,
+    cycle: u8,
+    tmp0: u8,
+    tmp1: u8,
+    tmp_addr: u16,
+}
+impl Debug for InstructionProcedure {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionProcedure")
+         .field("done", &self.done)
+         .field("cycle", &self.cycle)
+         .finish()
+    }
+}
+impl InstructionProcedure {
+    pub fn new(step_func: fn(&mut InstructionProcedure, &mut Cpu, &mut Bus), addr_mode: AddrMode) -> Self {
+        Self {
+            done: false,
+            func: step_func,
+            mode: addr_mode,
+            cycle: 1,
+            tmp0: 0,
+            tmp1: 0,
+            tmp_addr: 0
+        }
+    }
+    
+    pub fn step(&mut self, cpu: &mut Cpu, bus: &mut Bus) {
+        (self.func)(self, cpu, bus);
+        self.cycle += 1;
+    }
 }
 
 
@@ -46,373 +106,344 @@ pub enum AddrMode {
 pub struct Cpu {
     pub pc: u16,
     pub sp: Wrapping<u8>,
-    pub status: u8,
+    pub status: StatusReg,
     pub acc: u8,
     pub x: u8,
     pub y: u8,
     pub rdy: bool,
     prefetch: Option<u8>,
+    fetch_needed: bool,
+    cycles_to_wait: u8,
+    procedure: Option<InstructionProcedure>,
+    counter: usize,
 }
 impl Default for Cpu {
     fn default() -> Self {
         Self {
-            pc: 0xFFFC,
+            pc: 0,
             sp: Wrapping(0), // actually this is potentialy random at power-on // software typically initializes this to 0xFF
-            status: StatusFlags::default().bits,
+            status: StatusReg::default(),
             acc: 0,
             x: 0,
             y: 0,
             rdy: true,
             prefetch: None,
+            fetch_needed: false, // used for debugging
+            cycles_to_wait: 0,
+            procedure: None,
+            counter: 1,
         }
     }
 }
 
 impl Cpu {
-    pub fn cycle(&mut self, bus: &mut Bus) {
-        let opcode = self.prefetch.unwrap_or(self.fetch(bus));
+    pub fn init_pc(&mut self, bus: &mut Bus) {
+        self.pc = ((bus.cart.read(0xFFFD) as u16) << 8) | (bus.cart.read(0xFFFC) as u16);
         
-        use AddrMode::*;
-        match opcode {
-            0x00 => self.brk(),
-            0x01 => self.ora(IndirectX),
-            0x03 => self.slo(IndirectX),
-            0x04 => self.nop(Zero),
-            0x05 => self.ora(Zero),
-            0x06 => self.asl(Zero),
-            0x07 => self.slo(Zero),
-            0x08 => self.php(Implied),
-            0x09 => self.ora(Immediate),
-            0x0A => self.asl(Accumulator),
-            0x0B => self.anc(),
-            0x0C => self.nop(Absolute),
-            0x0D => self.ora(Absolute),
-            0x0E => self.asl(Absolute),
-            0x0F => self.slo(Absolute),
-            
-            0x10 => self.bpl(Relative),
-            0x11 => self.ora(IndirectY),
-            0x13 => self.slo(IndirectY),
-            0x14 => self.nop(ZeroX),
-            0x15 => self.ora(ZeroX),
-            0x16 => self.asl(ZeroX),
-            0x17 => self.slo(ZeroX),
-            0x18 => self.clc(Implied),
-            0x19 => self.ora(AbsoluteY),
-            0x1A => self.nop(Implied),
-            0x1B => self.slo(AbsoluteY),
-            0x1C => self.nop(AbsoluteX),
-            0x1D => self.ora(AbsoluteX),
-            0x1E => self.asl(AbsoluteX),
-            0x1F => self.slo(AbsoluteX),
-            
-            0x20 => self.jsr(),
-            0x21 => self.and(IndirectX),
-            0x23 => self.rla(IndirectX),
-            0x24 => self.bit(Zero),
-            0x25 => self.and(Zero),
-            0x26 => self.rol(Zero),
-            0x27 => self.rla(Zero),
-            0x28 => self.plp(Implied),
-            0x29 => self.and(Immediate),
-            0x2A => self.rol(Accumulator),
-            0x2B => self.anc(),
-            0x2C => self.bit(Absolute),
-            0x2D => self.and(Absolute),
-            0x2E => self.rol(Absolute),
-            0x2F => self.rla(Absolute),
-            
-            0x30 => self.bmi(Relative),
-            0x31 => self.and(IndirectY),
-            0x33 => self.rla(IndirectY),
-            0x34 => self.nop(ZeroX),
-            0x35 => self.and(ZeroX),
-            0x36 => self.rol(ZeroX),
-            0x37 => self.rla(ZeroX),
-            0x38 => self.sec(Implied),
-            0x39 => self.and(AbsoluteY),
-            0x3A => self.nop(Implied),
-            0x3B => self.rla(AbsoluteY),
-            0x3C => self.nop(AbsoluteX),
-            0x3D => self.and(AbsoluteX),
-            0x3E => self.rol(AbsoluteX),
-            0x3F => self.rla(AbsoluteX),
-            
-            0x40 => self.rti(),
-            0x41 => self.eor(IndirectX),
-            0x43 => self.sre(IndirectX),
-            0x44 => self.nop(Zero),
-            0x45 => self.eor(Zero),
-            0x46 => self.lsr(Zero),
-            0x47 => self.sre(Zero),
-            0x48 => self.pha(Implied),
-            0x49 => self.eor(Immediate),
-            0x4A => self.lsr(Accumulator),
-            0x4B => self.asr(),
-            0x4C => self.jmp(Absolute),
-            0x4D => self.eor(Absolute),
-            0x4E => self.lsr(Absolute),
-            0x4F => self.sre(Absolute),
-            
-            0x50 => self.bvc(Relative),
-            0x51 => self.eor(IndirectY),
-            0x53 => self.sre(IndirectY),
-            0x54 => self.nop(ZeroX),
-            0x55 => self.eor(ZeroX),
-            0x56 => self.lsr(ZeroX),
-            0x57 => self.sre(ZeroX),
-            0x58 => self.cli(),
-            0x59 => self.eor(AbsoluteY),
-            0x5A => self.nop(Implied),
-            0x5B => self.sre(AbsoluteY),
-            0x5C => self.nop(AbsoluteX),
-            0x5D => self.eor(AbsoluteX),
-            0x5E => self.lsr(AbsoluteX),
-            0x5F => self.sre(AbsoluteX),
-            
-            0x60 => self.rts(Implied),
-            0x61 => self.adc(IndirectX),
-            0x63 => self.rra(IndirectX),
-            0x64 => self.nop(Zero),
-            0x65 => self.adc(Zero),
-            0x66 => self.ror(Zero),
-            0x67 => self.rra(Zero),
-            0x68 => self.pla(Implied),
-            0x69 => self.adc(Immediate),
-            0x6A => self.ror(Accumulator),
-            0x6B => self.arr(),
-            0x6C => self.jmp(Absolute),
-            0x6D => self.adc(Absolute),
-            0x6E => self.ror(Absolute),
-            0x6F => self.rra(Absolute),
-            
-            0x70 => self.bvs(Relative),
-            0x71 => self.adc(IndirectY),
-            0x73 => self.rra(IndirectY),
-            0x74 => self.nop(ZeroX),
-            0x75 => self.adc(ZeroX),
-            0x76 => self.ror(ZeroX),
-            0x77 => self.rra(ZeroX),
-            0x78 => self.sei(),
-            0x79 => self.adc(AbsoluteY),
-            0x7A => self.nop(Implied),
-            0x7B => self.rra(AbsoluteY),
-            0x7C => self.nop(AbsoluteX),
-            0x7D => self.adc(AbsoluteX),
-            0x7E => self.ror(AbsoluteX),
-            0x7F => self.rra(AbsoluteX),
-            
-            0x80 => self.nop(Immediate),
-            0x81 => self.sta(IndirectX),
-            0x82 => self.nop(Immediate),
-            0x83 => self.sax(IndirectX),
-            0x84 => self.sty(Zero),
-            0x85 => self.sta(Zero),
-            0x86 => self.stx(Zero),
-            0x87 => self.sax(Zero),
-            0x88 => self.dey(Implied),
-            0x89 => self.nop(Immediate),
-            0x8A => self.txa(Implied),
-            0x8B => self.ane(),
-            0x8C => self.sty(Absolute),
-            0x8D => self.sta(Absolute),
-            0x8E => self.stx(Absolute),
-            0x8F => self.sax(Absolute),
-            
-            0x90 => self.bcc(Relative),
-            0x91 => self.sta(IndirectY),
-            0x93 => self.sha(IndirectY),
-            0x94 => self.sty(ZeroX),
-            0x95 => self.sta(ZeroX),
-            0x96 => self.stx(ZeroY),
-            0x97 => self.sax(ZeroY),
-            0x98 => self.tya(Implied),
-            0x99 => self.sta(AbsoluteY),
-            0x9A => self.txs(Implied),
-            0x9B => self.shs(),
-            0x9C => self.shy(),
-            0x9D => self.sta(AbsoluteX),
-            0x9E => self.shx(),
-            0x9F => self.sha(AbsoluteY),
-            
-            0xA0 => self.ldy(Immediate),
-            0xA1 => self.lda(IndirectX),
-            0xA2 => self.ldx(Immediate),
-            0xA3 => self.lax(IndirectX),
-            0xA4 => self.ldy(Zero),
-            0xA5 => self.lda(Zero),
-            0xA6 => self.ldx(Zero),
-            0xA7 => self.lax(Zero),
-            0xA8 => self.tay(Implied),
-            0xA9 => self.lda(Immediate),
-            0xAA => self.tax(Implied),
-            0xAB => self.lxa(),
-            0xAC => self.ldy(Absolute),
-            0xAD => self.lda(Absolute),
-            0xAE => self.ldx(Absolute),
-            0xAF => self.lax(Absolute),
-            
-            0xB0 => self.bcs(Relative),
-            0xB1 => self.lda(IndirectY),
-            0xB3 => self.lax(IndirectY),
-            0xB4 => self.ldy(ZeroX),
-            0xB5 => self.lda(ZeroX),
-            0xB6 => self.ldx(ZeroY),
-            0xB7 => self.lax(ZeroY),
-            0xB8 => self.clv(Implied),
-            0xB9 => self.lda(AbsoluteY),
-            0xBA => self.tsx(Implied),
-            0xBB => self.las(),
-            0xBC => self.ldy(AbsoluteX),
-            0xBD => self.lda(AbsoluteX),
-            0xBE => self.ldx(AbsoluteY),
-            0xBF => self.lax(AbsoluteY),
-            
-            0xC0 => self.cpy(Immediate),
-            0xC1 => self.cmp(IndirectX),
-            0xC2 => self.nop(Immediate),
-            0xC3 => self.dcp(IndirectX),
-            0xC4 => self.cpy(Zero),
-            0xC5 => self.cmp(Zero),
-            0xC6 => self.dec(Zero),
-            0xC7 => self.dcp(Zero),
-            0xC8 => self.iny(Implied),
-            0xC9 => self.cmp(Immediate),
-            0xCA => self.dex(Implied),
-            0xCB => self.sbx(),
-            0xCC => self.cpy(Absolute),
-            0xCD => self.cmp(Absolute),
-            0xCE => self.dec(Absolute),
-            0xCF => self.dcp(Absolute),
-            
-            0xD0 => self.bne(Relative),
-            0xD1 => self.cmp(IndirectY),
-            0xD3 => self.dcp(IndirectY),
-            0xD4 => self.nop(ZeroX),
-            0xD5 => self.cmp(ZeroX),
-            0xD6 => self.dec(ZeroX),
-            0xD7 => self.dcp(ZeroX),
-            0xD8 => self.cld(),
-            0xD9 => self.cmp(AbsoluteY),
-            0xDA => self.nop(Implied),
-            0xDB => self.dcp(AbsoluteY),
-            0xDC => self.nop(AbsoluteX),
-            0xDD => self.cmp(AbsoluteX),
-            0xDE => self.dec(AbsoluteX),
-            0xDF => self.dcp(AbsoluteX),
-            
-            0xE0 => self.cpx(Immediate),
-            0xE1 => self.sbc(IndirectX),
-            0xE2 => self.nop(Immediate),
-            0xE3 => self.isb(IndirectX),
-            0xE4 => self.cpx(Zero),
-            0xE5 => self.sbc(Zero),
-            0xE6 => self.inc(Zero),
-            0xE7 => self.isb(Zero),
-            0xE8 => self.inx(Implied),
-            0xE9 => self.sbc(Immediate),
-            0xEA => self.nop(Implied),
-            0xEB => self.sbc(Immediate),
-            0xEC => self.cpx(Absolute),
-            0xED => self.sbc(Absolute),
-            0xEE => self.inc(Absolute),
-            0xEF => self.isb(Absolute),
-            
-            0xF0 => self.beq(Relative),
-            0xF1 => self.sbc(IndirectY),
-            0xF3 => self.isb(IndirectY),
-            0xF4 => self.nop(ZeroX),
-            0xF5 => self.sbc(ZeroX),
-            0xF6 => self.inc(ZeroX),
-            0xF7 => self.isb(ZeroX),
-            0xF8 => self.sed(),
-            0xF9 => self.sbc(AbsoluteY),
-            0xFA => self.nop(Implied),
-            0xFB => self.isb(AbsoluteY),
-            0xFC => self.nop(AbsoluteX),
-            0xFD => self.sbc(AbsoluteX),
-            0xFE => self.inc(AbsoluteX),
-            0xFF => self.isb(AbsoluteX),
-            
-            _ => panic!("Attempt to run invalid opcode! PC: {:#06X}, Op: {:#06X}", self.pc, opcode)
-        }
+        //self.status = StatusReg::from_bits_truncate(0b01011101); // debugging, matches Stella's initial state
     }
     
-    fn adc(&mut self, mode: AddrMode) {}
-    fn anc(&mut self) {}
-    fn and(&mut self, mode: AddrMode) {}
-    fn ane(&mut self) {}
-    fn arr(&mut self) {}
-    fn asl(&mut self, mode: AddrMode) {}
-    fn asr(&mut self) {}
-    fn bcc(&mut self, mode: AddrMode) {}
-    fn bcs(&mut self, mode: AddrMode) {}
-    fn beq(&mut self, mode: AddrMode) {}
-    fn bit(&mut self, mode: AddrMode) {}
-    fn bmi(&mut self, mode: AddrMode) {}
-    fn bne(&mut self, mode: AddrMode) {}
-    fn bpl(&mut self, mode: AddrMode) {}
-    fn brk(&mut self) {}
-    fn bvc(&mut self, mode: AddrMode) {}
-    fn bvs(&mut self, mode: AddrMode) {}
-    fn clc(&mut self, mode: AddrMode) {}
-    fn cld(&mut self) {}
-    fn cli(&mut self) {}
-    fn clv(&mut self, mode: AddrMode) {}
-    fn cmp(&mut self, mode: AddrMode) {}
-    fn cpx(&mut self, mode: AddrMode) {}
-    fn cpy(&mut self, mode: AddrMode) {}
-    fn dcp(&mut self, mode: AddrMode) {}
-    fn dec(&mut self, mode: AddrMode) {}
-    fn dex(&mut self, mode: AddrMode) {}
-    fn dey(&mut self, mode: AddrMode) {}
-    fn eor(&mut self, mode: AddrMode) {}
-    fn inc(&mut self, mode: AddrMode) {}
-    fn inx(&mut self, mode: AddrMode) {}
-    fn iny(&mut self, mode: AddrMode) {}
-    fn isb(&mut self, mode: AddrMode) {}
-    fn jmp(&mut self, mode: AddrMode) {}
-    fn jsr(&mut self) {}
-    fn las(&mut self) {}
-    fn lax(&mut self, mode: AddrMode) {}
-    fn lda(&mut self, mode: AddrMode) {}
-    fn ldx(&mut self, mode: AddrMode) {}
-    fn ldy(&mut self, mode: AddrMode) {}
-    fn lsr(&mut self, mode: AddrMode) {}
-    fn lxa(&mut self) {}
-    fn nop(&mut self, mode: AddrMode) {}
-    fn ora(&mut self, mode: AddrMode) {}
-    fn pha(&mut self, mode: AddrMode) {}
-    fn php(&mut self, mode: AddrMode) {}
-    fn pla(&mut self, mode: AddrMode) {}
-    fn plp(&mut self, mode: AddrMode) {}
-    fn rla(&mut self, mode: AddrMode) {}
-    fn rra(&mut self, mode: AddrMode) {}
-    fn rol(&mut self, mode: AddrMode) {}
-    fn ror(&mut self, mode: AddrMode) {}
-    fn rti(&mut self) {}
-    fn rts(&mut self, mode: AddrMode) {}
-    fn sax(&mut self, mode: AddrMode) {}
-    fn sbc(&mut self, mode: AddrMode) {}
-    fn sbx(&mut self) {}
-    fn sec(&mut self, mode: AddrMode) {}
-    fn sed(&mut self) {}
-    fn sei(&mut self) {}
-    fn sha(&mut self, mode: AddrMode) {}
-    fn shs(&mut self) {}
-    fn shx(&mut self) {}
-    fn shy(&mut self) {}
-    fn slo(&mut self, mode: AddrMode) {}
-    fn sre(&mut self, mode: AddrMode) {}
-    fn sta(&mut self, mode: AddrMode) {}
-    fn stx(&mut self, mode: AddrMode) {}
-    fn sty(&mut self, mode: AddrMode) {}
-    fn tax(&mut self, mode: AddrMode) {}
-    fn tay(&mut self, mode: AddrMode) {}
-    fn tsx(&mut self, mode: AddrMode) {}
-    fn txa(&mut self, mode: AddrMode) {}
-    fn txs(&mut self, mode: AddrMode) {}
-    fn tya(&mut self, mode: AddrMode) {}
+    pub fn cycle(&mut self, bus_cell: &InfCell<Bus>) {
+        let bus = bus_cell.get_mut();
+        //let bus_ref = bus_cell.get_mut();
+        
+        if self.procedure.is_none() {
+            if self.prefetch.is_none() { // if next instruction wasn't prefetched at end of previous, we must fetch now (this is considered the first cycle of procedure)
+                self.prefetch = Some(self.fetch(bus));
+                
+                println!("Fetched! PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}", self.pc - 1, self.prefetch.unwrap(), self.status, self.acc, self.x, self.y);
+                self.fetch_needed = true;
+                
+                //return;
+            }
+            
+            let opcode = self.prefetch.unwrap();
+            self.prefetch = None;
+            
+            self.procedure = Some(match opcode {
+            
+            0x00 => InstructionProcedure::new(brk, Auto),
+            0x01 => InstructionProcedure::new(ora, IndirectX),
+            0x03 => InstructionProcedure::new(slo, IndirectX),
+            0x04 => InstructionProcedure::new(nop, Zero),
+            0x05 => InstructionProcedure::new(ora, Zero),
+            0x06 => InstructionProcedure::new(asl, Zero),
+            0x07 => InstructionProcedure::new(slo, Zero),
+            0x08 => InstructionProcedure::new(php, Implied),
+            0x09 => InstructionProcedure::new(ora, Immediate),
+            0x0A => InstructionProcedure::new(asl, Accumulator),
+            0x0B => InstructionProcedure::new(anc, Auto),
+            0x0C => InstructionProcedure::new(nop, Absolute),
+            0x0D => InstructionProcedure::new(ora, Absolute),
+            0x0E => InstructionProcedure::new(asl, Absolute),
+            0x0F => InstructionProcedure::new(slo, Absolute),
+            
+            0x10 => InstructionProcedure::new(bpl, Relative),
+            0x11 => InstructionProcedure::new(ora, IndirectY),
+            0x13 => InstructionProcedure::new(slo, IndirectY),
+            0x14 => InstructionProcedure::new(nop, ZeroX),
+            0x15 => InstructionProcedure::new(ora, ZeroX),
+            0x16 => InstructionProcedure::new(asl, ZeroX),
+            0x17 => InstructionProcedure::new(slo, ZeroX),
+            0x18 => InstructionProcedure::new(clc, Implied),
+            0x19 => InstructionProcedure::new(ora, AbsoluteY),
+            0x1A => InstructionProcedure::new(nop, Implied),
+            0x1B => InstructionProcedure::new(slo, AbsoluteY),
+            0x1C => InstructionProcedure::new(nop, AbsoluteX),
+            0x1D => InstructionProcedure::new(ora, AbsoluteX),
+            0x1E => InstructionProcedure::new(asl, AbsoluteX),
+            0x1F => InstructionProcedure::new(slo, AbsoluteX),
+            
+            0x20 => InstructionProcedure::new(jsr, Auto),
+            0x21 => InstructionProcedure::new(and, IndirectX),
+            0x23 => InstructionProcedure::new(rla, IndirectX),
+            0x24 => InstructionProcedure::new(bit, Zero),
+            0x25 => InstructionProcedure::new(and, Zero),
+            0x26 => InstructionProcedure::new(rol, Zero),
+            0x27 => InstructionProcedure::new(rla, Zero),
+            0x28 => InstructionProcedure::new(plp, Implied),
+            0x29 => InstructionProcedure::new(and, Immediate),
+            0x2A => InstructionProcedure::new(rol, Accumulator),
+            0x2B => InstructionProcedure::new(anc, Auto),
+            0x2C => InstructionProcedure::new(bit, Absolute),
+            0x2D => InstructionProcedure::new(and, Absolute),
+            0x2E => InstructionProcedure::new(rol, Absolute),
+            0x2F => InstructionProcedure::new(rla, Absolute),
+            
+            0x30 => InstructionProcedure::new(bmi, Relative),
+            0x31 => InstructionProcedure::new(and, IndirectY),
+            0x33 => InstructionProcedure::new(rla, IndirectY),
+            0x34 => InstructionProcedure::new(nop, ZeroX),
+            0x35 => InstructionProcedure::new(and, ZeroX),
+            0x36 => InstructionProcedure::new(rol, ZeroX),
+            0x37 => InstructionProcedure::new(rla, ZeroX),
+            0x38 => InstructionProcedure::new(sec, Implied),
+            0x39 => InstructionProcedure::new(and, AbsoluteY),
+            0x3A => InstructionProcedure::new(nop, Implied),
+            0x3B => InstructionProcedure::new(rla, AbsoluteY),
+            0x3C => InstructionProcedure::new(nop, AbsoluteX),
+            0x3D => InstructionProcedure::new(and, AbsoluteX),
+            0x3E => InstructionProcedure::new(rol, AbsoluteX),
+            0x3F => InstructionProcedure::new(rla, AbsoluteX),
+            
+            0x40 => InstructionProcedure::new(rti, Auto),
+            0x41 => InstructionProcedure::new(eor, IndirectX),
+            0x43 => InstructionProcedure::new(sre, IndirectX),
+            0x44 => InstructionProcedure::new(nop, Zero),
+            0x45 => InstructionProcedure::new(eor, Zero),
+            0x46 => InstructionProcedure::new(lsr, Zero),
+            0x47 => InstructionProcedure::new(sre, Zero),
+            0x48 => InstructionProcedure::new(pha, Implied),
+            0x49 => InstructionProcedure::new(eor, Immediate),
+            0x4A => InstructionProcedure::new(lsr, Accumulator),
+            0x4B => InstructionProcedure::new(asr, Auto),
+            0x4C => InstructionProcedure::new(jmp, Absolute),
+            0x4D => InstructionProcedure::new(eor, Absolute),
+            0x4E => InstructionProcedure::new(lsr, Absolute),
+            0x4F => InstructionProcedure::new(sre, Absolute),
+            
+            0x50 => InstructionProcedure::new(bvc, Relative),
+            0x51 => InstructionProcedure::new(eor, IndirectY),
+            0x53 => InstructionProcedure::new(sre, IndirectY),
+            0x54 => InstructionProcedure::new(nop, ZeroX),
+            0x55 => InstructionProcedure::new(eor, ZeroX),
+            0x56 => InstructionProcedure::new(lsr, ZeroX),
+            0x57 => InstructionProcedure::new(sre, ZeroX),
+            0x58 => InstructionProcedure::new(cli, Auto),
+            0x59 => InstructionProcedure::new(eor, AbsoluteY),
+            0x5A => InstructionProcedure::new(nop, Implied),
+            0x5B => InstructionProcedure::new(sre, AbsoluteY),
+            0x5C => InstructionProcedure::new(nop, AbsoluteX),
+            0x5D => InstructionProcedure::new(eor, AbsoluteX),
+            0x5E => InstructionProcedure::new(lsr, AbsoluteX),
+            0x5F => InstructionProcedure::new(sre, AbsoluteX),
+            
+            0x60 => InstructionProcedure::new(rts, Implied),
+            0x61 => InstructionProcedure::new(adc, IndirectX),
+            0x63 => InstructionProcedure::new(rra, IndirectX),
+            0x64 => InstructionProcedure::new(nop, Zero),
+            0x65 => InstructionProcedure::new(adc, Zero),
+            0x66 => InstructionProcedure::new(ror, Zero),
+            0x67 => InstructionProcedure::new(rra, Zero),
+            0x68 => InstructionProcedure::new(pla, Implied),
+            0x69 => InstructionProcedure::new(adc, Immediate),
+            0x6A => InstructionProcedure::new(ror, Accumulator),
+            0x6B => InstructionProcedure::new(arr, Auto),
+            0x6C => InstructionProcedure::new(jmp, Indirect),
+            0x6D => InstructionProcedure::new(adc, Absolute),
+            0x6E => InstructionProcedure::new(ror, Absolute),
+            0x6F => InstructionProcedure::new(rra, Absolute),
+            
+            0x70 => InstructionProcedure::new(bvs, Relative),
+            0x71 => InstructionProcedure::new(adc, IndirectY),
+            0x73 => InstructionProcedure::new(rra, IndirectY),
+            0x74 => InstructionProcedure::new(nop, ZeroX),
+            0x75 => InstructionProcedure::new(adc, ZeroX),
+            0x76 => InstructionProcedure::new(ror, ZeroX),
+            0x77 => InstructionProcedure::new(rra, ZeroX),
+            0x78 => InstructionProcedure::new(sei, Auto),
+            0x79 => InstructionProcedure::new(adc, AbsoluteY),
+            0x7A => InstructionProcedure::new(nop, Implied),
+            0x7B => InstructionProcedure::new(rra, AbsoluteY),
+            0x7C => InstructionProcedure::new(nop, AbsoluteX),
+            0x7D => InstructionProcedure::new(adc, AbsoluteX),
+            0x7E => InstructionProcedure::new(ror, AbsoluteX),
+            0x7F => InstructionProcedure::new(rra, AbsoluteX),
+            
+            0x80 => InstructionProcedure::new(nop, Immediate),
+            0x81 => InstructionProcedure::new(sta, IndirectX),
+            0x82 => InstructionProcedure::new(nop, Immediate),
+            0x83 => InstructionProcedure::new(sax, IndirectX),
+            0x84 => InstructionProcedure::new(sty, Zero),
+            0x85 => InstructionProcedure::new(sta, Zero),
+            0x86 => InstructionProcedure::new(stx, Zero),
+            0x87 => InstructionProcedure::new(sax, Zero),
+            0x88 => InstructionProcedure::new(dey, Implied),
+            0x89 => InstructionProcedure::new(nop, Immediate),
+            0x8A => InstructionProcedure::new(txa, Implied),
+            0x8B => InstructionProcedure::new(ane, Auto),
+            0x8C => InstructionProcedure::new(sty, Absolute),
+            0x8D => InstructionProcedure::new(sta, Absolute),
+            0x8E => InstructionProcedure::new(stx, Absolute),
+            0x8F => InstructionProcedure::new(sax, Absolute),
+            
+            0x90 => InstructionProcedure::new(bcc, Relative),
+            0x91 => InstructionProcedure::new(sta, IndirectY),
+            0x93 => InstructionProcedure::new(sha, IndirectY),
+            0x94 => InstructionProcedure::new(sty, ZeroX),
+            0x95 => InstructionProcedure::new(sta, ZeroX),
+            0x96 => InstructionProcedure::new(stx, ZeroY),
+            0x97 => InstructionProcedure::new(sax, ZeroY),
+            0x98 => InstructionProcedure::new(tya, Implied),
+            0x99 => InstructionProcedure::new(sta, AbsoluteY),
+            0x9A => InstructionProcedure::new(txs, Implied),
+            0x9B => InstructionProcedure::new(shs, Auto),
+            0x9C => InstructionProcedure::new(shy, Auto),
+            0x9D => InstructionProcedure::new(sta, AbsoluteX),
+            0x9E => InstructionProcedure::new(shx, Auto),
+            0x9F => InstructionProcedure::new(sha, AbsoluteY),
+            
+            0xA0 => InstructionProcedure::new(ldy, Immediate),
+            0xA1 => InstructionProcedure::new(lda, IndirectX),
+            0xA2 => InstructionProcedure::new(ldx, Immediate),
+            0xA3 => InstructionProcedure::new(lax, IndirectX),
+            0xA4 => InstructionProcedure::new(ldy, Zero),
+            0xA5 => InstructionProcedure::new(lda, Zero),
+            0xA6 => InstructionProcedure::new(ldx, Zero),
+            0xA7 => InstructionProcedure::new(lax, Zero),
+            0xA8 => InstructionProcedure::new(tay, Implied),
+            0xA9 => InstructionProcedure::new(lda, Immediate),
+            0xAA => InstructionProcedure::new(tax, Implied),
+            0xAB => InstructionProcedure::new(lxa, Auto),
+            0xAC => InstructionProcedure::new(ldy, Absolute),
+            0xAD => InstructionProcedure::new(lda, Absolute),
+            0xAE => InstructionProcedure::new(ldx, Absolute),
+            0xAF => InstructionProcedure::new(lax, Absolute),
+            
+            0xB0 => InstructionProcedure::new(bcs, Relative),
+            0xB1 => InstructionProcedure::new(lda, IndirectY),
+            0xB3 => InstructionProcedure::new(lax, IndirectY),
+            0xB4 => InstructionProcedure::new(ldy, ZeroX),
+            0xB5 => InstructionProcedure::new(lda, ZeroX),
+            0xB6 => InstructionProcedure::new(ldx, ZeroY),
+            0xB7 => InstructionProcedure::new(lax, ZeroY),
+            0xB8 => InstructionProcedure::new(clv, Implied),
+            0xB9 => InstructionProcedure::new(lda, AbsoluteY),
+            0xBA => InstructionProcedure::new(tsx, Implied),
+            0xBB => InstructionProcedure::new(las, Auto),
+            0xBC => InstructionProcedure::new(ldy, AbsoluteX),
+            0xBD => InstructionProcedure::new(lda, AbsoluteX),
+            0xBE => InstructionProcedure::new(ldx, AbsoluteY),
+            0xBF => InstructionProcedure::new(lax, AbsoluteY),
+            
+            0xC0 => InstructionProcedure::new(cpy, Immediate),
+            0xC1 => InstructionProcedure::new(cmp, IndirectX),
+            0xC2 => InstructionProcedure::new(nop, Immediate),
+            0xC3 => InstructionProcedure::new(dcp, IndirectX),
+            0xC4 => InstructionProcedure::new(cpy, Zero),
+            0xC5 => InstructionProcedure::new(cmp, Zero),
+            0xC6 => InstructionProcedure::new(dec, Zero),
+            0xC7 => InstructionProcedure::new(dcp, Zero),
+            0xC8 => InstructionProcedure::new(iny, Implied),
+            0xC9 => InstructionProcedure::new(cmp, Immediate),
+            0xCA => InstructionProcedure::new(dex, Implied),
+            0xCB => InstructionProcedure::new(sbx, Auto),
+            0xCC => InstructionProcedure::new(cpy, Absolute),
+            0xCD => InstructionProcedure::new(cmp, Absolute),
+            0xCE => InstructionProcedure::new(dec, Absolute),
+            0xCF => InstructionProcedure::new(dcp, Absolute),
+            
+            0xD0 => InstructionProcedure::new(bne, Relative),
+            0xD1 => InstructionProcedure::new(cmp, IndirectY),
+            0xD3 => InstructionProcedure::new(dcp, IndirectY),
+            0xD4 => InstructionProcedure::new(nop, ZeroX),
+            0xD5 => InstructionProcedure::new(cmp, ZeroX),
+            0xD6 => InstructionProcedure::new(dec, ZeroX),
+            0xD7 => InstructionProcedure::new(dcp, ZeroX),
+            0xD8 => InstructionProcedure::new(cld, Auto),
+            0xD9 => InstructionProcedure::new(cmp, AbsoluteY),
+            0xDA => InstructionProcedure::new(nop, Implied),
+            0xDB => InstructionProcedure::new(dcp, AbsoluteY),
+            0xDC => InstructionProcedure::new(nop, AbsoluteX),
+            0xDD => InstructionProcedure::new(cmp, AbsoluteX),
+            0xDE => InstructionProcedure::new(dec, AbsoluteX),
+            0xDF => InstructionProcedure::new(dcp, AbsoluteX),
+            
+            0xE0 => InstructionProcedure::new(cpx, Immediate),
+            0xE1 => InstructionProcedure::new(sbc, IndirectX),
+            0xE2 => InstructionProcedure::new(nop, Immediate),
+            0xE3 => InstructionProcedure::new(isb, IndirectX),
+            0xE4 => InstructionProcedure::new(cpx, Zero),
+            0xE5 => InstructionProcedure::new(sbc, Zero),
+            0xE6 => InstructionProcedure::new(inc, Zero),
+            0xE7 => InstructionProcedure::new(isb, Zero),
+            0xE8 => InstructionProcedure::new(inx, Implied),
+            0xE9 => InstructionProcedure::new(sbc, Immediate),
+            0xEA => InstructionProcedure::new(nop, Implied),
+            0xEB => InstructionProcedure::new(sbc, Immediate),
+            0xEC => InstructionProcedure::new(cpx, Absolute),
+            0xED => InstructionProcedure::new(sbc, Absolute),
+            0xEE => InstructionProcedure::new(inc, Absolute),
+            0xEF => InstructionProcedure::new(isb, Absolute),
+            
+            0xF0 => InstructionProcedure::new(beq, Relative),
+            0xF1 => InstructionProcedure::new(sbc, IndirectY),
+            0xF3 => InstructionProcedure::new(isb, IndirectY),
+            0xF4 => InstructionProcedure::new(nop, ZeroX),
+            0xF5 => InstructionProcedure::new(sbc, ZeroX),
+            0xF6 => InstructionProcedure::new(inc, ZeroX),
+            0xF7 => InstructionProcedure::new(isb, ZeroX),
+            0xF8 => InstructionProcedure::new(sed, Auto),
+            0xF9 => InstructionProcedure::new(sbc, AbsoluteY),
+            0xFA => InstructionProcedure::new(nop, Implied),
+            0xFB => InstructionProcedure::new(isb, AbsoluteY),
+            0xFC => InstructionProcedure::new(nop, AbsoluteX),
+            0xFD => InstructionProcedure::new(sbc, AbsoluteX),
+            0xFE => InstructionProcedure::new(inc, AbsoluteX),
+            0xFF => InstructionProcedure::new(isb, AbsoluteX),
+            
+            _ => panic!("Attempt to run invalid/unimplemented opcode! PC: {:#06X}, Op: {:#06X}", self.pc, opcode)
+        }); // decode opcode into an instruction procedure (this doesn't consume cycles)
+            /*if self.fetch_needed {
+                self.procedure.as_mut().unwrap().cycle += 1; // if a fetch was required to get opcode, then this instruction is now 
+            }*/
+            
+            // debugging
+            if !self.fetch_needed {
+                println!("         PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}", self.pc - 1, opcode, self.status, self.acc, self.x, self.y);
+            }
+            self.fetch_needed = false;
+        }
+        
+        let mut proc = self.procedure.unwrap();
+        proc.step(self, bus);
+        
+        if proc.done {
+            self.procedure = None;
+        } else {
+            self.procedure = Some(proc);
+        }
+    }
     
     fn fetch(&mut self, bus: &mut Bus) -> u8 {
         let fetch = bus.read(self.pc);
@@ -421,7 +452,6 @@ impl Cpu {
         fetch
     }
 }
-
 impl BusAccessable for Cpu {
     fn write(&mut self, addr: u16, data: u8) {
         todo!()
@@ -430,4 +460,258 @@ impl BusAccessable for Cpu {
     fn read(&self, addr: u16) -> u8 {
         todo!()
     }
+}
+
+fn adc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn anc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn and(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn ane(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn arr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn asl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn asr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bcc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bcs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn beq(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bit(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bmi(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bne(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bpl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            procedure.tmp0 = cpu.fetch(bus);
+            if cpu.status.contains(StatusReg::Negative) { // if Negative is set, do not branch
+                cpu.prefetch = Some(cpu.fetch(bus));
+                procedure.done = true;
+            }
+        },
+        3 => {
+            procedure.tmp_addr = cpu.pc + procedure.tmp0 as i8 as u16;
+            if (cpu.pc & 0xFF00) == (procedure.tmp_addr & 0xFF00) { // branch to same page
+                cpu.pc = procedure.tmp_addr;
+                cpu.prefetch = Some(cpu.fetch(bus));
+                procedure.done = true;
+            }
+        },
+        4 => {
+            cpu.pc = procedure.tmp_addr;
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn brk(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bvc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bvs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn clc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn cld(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.status.set(StatusReg::Decimal, false);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn cli(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn clv(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn cmp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn cpx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn cpy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn dcp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn dec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn dex(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.x -= 1;
+            cpu.status.set(StatusReg::Zero, cpu.x == 0);
+            cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn dey(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn eor(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn inc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn inx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn iny(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn isb(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn jmp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.mode {
+        Absolute => {
+            match procedure.cycle {
+                2 => procedure.tmp0 = cpu.fetch(bus),
+                3 => {
+                    let pch = bus.read(cpu.pc) as u16;
+                    cpu.pc = (pch << 8) | (procedure.tmp0 as u16);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                },
+                _ => ()
+            }
+        },
+        Indirect => {
+            match procedure.cycle {
+                2 => procedure.tmp0 = cpu.fetch(bus),
+                3 => procedure.tmp1 = cpu.fetch(bus),
+                4 => {
+                    procedure.tmp_addr = ((procedure.tmp1 as u16) << 8) | (procedure.tmp0 as u16);
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                },
+                5 => {
+                    procedure.tmp1 = bus.read(procedure.tmp_addr + 1);
+                    
+                    cpu.pc = ((procedure.tmp1 as u16) << 8) | (procedure.tmp0 as u16);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                }
+                _ => ()
+            }
+        },
+        _ => panic!("Invalid mode!")
+    }
+}
+fn jsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn las(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn lax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn lda(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        cpu.acc = bus.read(addr);
+        
+        cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+        cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
+fn ldx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        cpu.x = bus.read(addr);
+        
+        cpu.status.set(StatusReg::Zero, cpu.x == 0);
+        cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
+fn ldy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn lsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn lxa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn nop(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn ora(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn pha(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn php(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn pla(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn plp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rla(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rra(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rol(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn ror(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rti(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rts(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sbc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sbx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sed(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sei(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.status.set(StatusReg::InterruptDisable, true);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn sha(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn shs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn shx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn shy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn slo(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sre(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sta(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        bus.write(addr, cpu.acc);
+        procedure.done = true;
+    }
+}
+fn stx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sty(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn tax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn tay(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn tsx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn txa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn txs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn tya(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+
+fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) -> Option<u16> {
+    match procedure.mode {
+        Immediate => {
+            match procedure.cycle {
+                2 => {
+                    let pc = cpu.pc;
+                    cpu.pc += 1;
+                    
+                    Some(pc)
+                },
+                _ => None
+            }
+        },
+        Zero => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    Some(addr_concat(0x00, procedure.tmp0))
+                },
+                _ => None
+            }
+        },
+        Absolute => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    procedure.tmp1 = cpu.fetch(bus);
+                    None
+                },
+                4 => {
+                    Some(addr_concat(procedure.tmp1, procedure.tmp0))
+                },
+                _ => None
+            }
+        },
+        ZeroX | ZeroY => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                // 3 => { read bus at (0x00, tmp0), but ignore data }
+                4 => {
+                    if procedure.mode == ZeroX {
+                        Some(((procedure.tmp0 as u16) + (cpu.x as u16)) & 0x00FF)
+                    } else {
+                        Some(((procedure.tmp0 as u16) + (cpu.y as u16)) & 0x00FF)
+                    }
+                }
+                _ => None
+            }
+        }
+        _ => unimplemented!()
+    }
+}
+
+fn addr_concat(high: u8, low: u8) -> u16 {
+    ((high as u16) << 8) | (low as u16)
 }

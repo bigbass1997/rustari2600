@@ -1,10 +1,11 @@
 use crate::arch::BusAccessable;
-use crate::{Bus, Cpu};
+use crate::{Bus, Cpu, InfCell};
 
 #[derive(Clone, Debug, Default)]
 pub struct Tia {
     wsync: bool,
     div3_counter: u8,
+    pub(crate) cpu_counter: isize, // debug only
 }
 impl Tia {
     /// Perform one clock cycle of the TIA chip. This chip contains a clock divider which
@@ -15,7 +16,9 @@ impl Tia {
     /// per second.
     /// 
     /// The TIA will process its clock first, and then depending on the divider, will clock the CPU.
-    pub fn cycle(&mut self, bus: &mut Bus) {
+    pub fn cycle(&mut self, bus_cell: &InfCell<Bus>) {
+        let bus = bus_cell.get_mut();
+        let bus_ref = bus_cell.get_mut();
         let mut cpu = &mut bus.cpu;
         
         //TODO: TIA stuff here
@@ -25,8 +28,11 @@ impl Tia {
         
         self.div3_counter += 1;
         if self.div3_counter == 3 {
+            println!("Cycles: {}", self.cpu_counter);
+            self.cpu_counter += 1;
+            
             self.div3_counter = 0;
-            cpu.cycle(self);
+            cpu.cycle(bus_cell);
         }
     }
 }
@@ -37,7 +43,7 @@ impl BusAccessable for Tia {
             0x01 => unimplemented!(),
             0x02 => self.wsync = true,
             0x03 => unimplemented!(),
-            0x04 => unimplemented!(),
+           /* 0x04 => unimplemented!(),
             0x05 => unimplemented!(),
             0x06 => unimplemented!(),
             0x07 => unimplemented!(),
@@ -77,9 +83,9 @@ impl BusAccessable for Tia {
             0x29 => unimplemented!(),
             0x2A => unimplemented!(),
             0x2B => unimplemented!(),
-            0x2C => unimplemented!(),
+            0x2C => (), //TODO*/
             _ => {
-                println!("TIA: Invalid write to 0x{:#04X} (0x{:#02X}", addr, data);
+                println!("TIA: Invalid write to {:#04X} ({:#02X})", addr, data);
             }
         }
     }

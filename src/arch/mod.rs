@@ -25,13 +25,18 @@ impl BusAccessable for Bus {
     fn write(&mut self, addr: u16, data: u8) {
         match addr {
             0x0000..=0x002C => self.tia.write(addr, data),
-            0x0080..=0x00FF => self.pia.write(addr, data),
+            0x0080..=0x00FF | 0x0280..=0x0297 => self.pia.write(addr, data),
             0xF000..=0xFFFF => self.cart.write(addr, data),
-            _ => println!("Write attempt to invalid address {:#04X} ({:#04X})", addr, data),
+            _ => panic!("Write attempt to invalid address {:#06X} ({:#04X})", addr, data),
         }
     }
 
     fn read(&self, addr: u16) -> u8 {
-        todo!()
+        match addr {
+            0x0000..=0x000D | 0x0030..=0x003D => self.tia.read(addr),
+            0x0080..=0x00FF | 0x0280..=0x0297 => self.pia.read(addr),
+            0xF000..=0xFFFF => self.cart.read(addr),
+            _ => panic!("Read attempt to invalid address {:#06X}", addr),
+        }
     }
 }

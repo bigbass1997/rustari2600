@@ -3,6 +3,7 @@ use crate::{Bus, Cpu, InfCell};
 
 #[derive(Clone, Debug, Default)]
 pub struct Tia {
+    vsync: bool,
     wsync: bool,
     div3_counter: u8,
     pub(crate) cpu_counter: isize, // debug only
@@ -38,10 +39,11 @@ impl Tia {
 }
 impl BusAccessable for Tia {
     fn write(&mut self, addr: u16, data: u8) {
+        println!("TIA Write: {:02X} to {:04X}", data, addr);
         match addr {
-            0x00 => unimplemented!(),
+            0x00 => /*self.vsync = (data & 0b10) != 0*/ unimplemented!(),
             0x01 => unimplemented!(),
-            0x02 => self.wsync = true,
+            0x02 => /*self.wsync = true*/ todo!(),
             0x03 => unimplemented!(),
            /* 0x04 => unimplemented!(),
             0x05 => unimplemented!(),

@@ -3,6 +3,7 @@
 
 use std::fmt::{Debug, Formatter};
 use std::num::Wrapping;
+use std::ops::SubAssign;
 use crate::arch::BusAccessable;
 use crate::{Bus, InfCell};
 use bitflags::bitflags;
@@ -111,6 +112,7 @@ pub struct Cpu {
     pub x: u8,
     pub y: u8,
     pub rdy: bool,
+    stack: [u8; 256],
     prefetch: Option<u8>,
     fetch_needed: bool,
     cycles_to_wait: u8,
@@ -127,6 +129,7 @@ impl Default for Cpu {
             x: 0,
             y: 0,
             rdy: true,
+            stack: [0u8; 256],
             prefetch: None,
             fetch_needed: false, // used for debugging
             cycles_to_wait: 0,
@@ -151,7 +154,7 @@ impl Cpu {
             if self.prefetch.is_none() { // if next instruction wasn't prefetched at end of previous, we must fetch now (this is considered the first cycle of procedure)
                 self.prefetch = Some(self.fetch(bus));
                 
-                println!("Fetched! PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}", self.pc - 1, self.prefetch.unwrap(), self.status, self.acc, self.x, self.y);
+                println!("Fetched! PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, self.prefetch.unwrap(), self.status, self.acc, self.x, self.y, self.sp);
                 self.fetch_needed = true;
                 
                 //return;
@@ -430,7 +433,7 @@ impl Cpu {
             
             // debugging
             if !self.fetch_needed {
-                println!("         PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}", self.pc - 1, opcode, self.status, self.acc, self.x, self.y);
+                println!("         PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, opcode, self.status, self.acc, self.x, self.y, self.sp);
             }
             self.fetch_needed = false;
         }
@@ -451,14 +454,30 @@ impl Cpu {
         
         fetch
     }
+    
+    fn stack_push(&mut self, bus: &mut Bus, data: u8) {
+        bus.write(0x100 + self.sp.0 as u16, data);
+        self.sp -= Wrapping(1);
+    }
+    
+    fn stack_pop(&mut self, bus: &mut Bus) -> u8 {
+        self.sp += Wrapping(1);
+        bus.read(0x100 + self.sp.0 as u16)
+    }
 }
 impl BusAccessable for Cpu {
     fn write(&mut self, addr: u16, data: u8) {
-        todo!()
+        match addr {
+            0x0100..=0x01FF => self.stack[(addr & 0x00FF) as usize] = data,
+            _ => panic!("Write attempt to invalid address {:#06X} ({:#04X})", addr, data),
+        }
     }
 
     fn read(&self, addr: u16) -> u8 {
-        todo!()
+        match addr {
+            0x0100..=0x01FF => self.stack[(addr & 0x00FF) as usize],
+            _ => panic!("Read attempt to invalid address {:#06X}", addr),
+        }
     }
 }
 
@@ -467,25 +486,75 @@ fn anc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { uni
 fn and(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn ane(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn arr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn asl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn asl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.mode {
+        Accumulator => {
+            match procedure.cycle {
+                2 => {
+                    cpu.status.set(StatusReg::Carry, cpu.acc & 0x80 != 0);
+                    cpu.acc <<= 1;
+                    
+                    cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+                    cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                },
+                _ => ()
+            }
+        },
+        _ => {
+            if let Some(addr) = read_modify_write(procedure, cpu, bus) {
+                cpu.status.set(StatusReg::Carry, procedure.tmp0 & 0x80 != 0);
+                procedure.tmp0 <<= 1;
+                
+                cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
+                cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);
+                bus.write(addr, procedure.tmp0);
+                
+                procedure.done = true;
+            }
+        }
+    }
+}
 fn asr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bcc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bcs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn beq(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bcc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, !cpu.status.contains(StatusReg::Carry));
+}
+fn bcs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Carry));
+}
+fn beq(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Zero));
+}
 fn bit(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bmi(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bne(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bmi(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Negative));
+}
+fn bne(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, !cpu.status.contains(StatusReg::Zero));
+}
 fn bpl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, !cpu.status.contains(StatusReg::Negative));
+}
+fn brk(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bvc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, !cpu.status.contains(StatusReg::Overflow));
+}
+fn bvs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Overflow));
+}
+
+fn branch(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus, to_branch: bool) {
     match procedure.cycle {
         2 => {
             procedure.tmp0 = cpu.fetch(bus);
-            if cpu.status.contains(StatusReg::Negative) { // if Negative is set, do not branch
+            if !to_branch { // if to_branch is false, do not branch
                 cpu.prefetch = Some(cpu.fetch(bus));
                 procedure.done = true;
             }
         },
         3 => {
-            procedure.tmp_addr = cpu.pc + procedure.tmp0 as i8 as u16;
+            procedure.tmp_addr = (cpu.pc as i16 + procedure.tmp0 as i8 as i16) as u16;
             if (cpu.pc & 0xFF00) == (procedure.tmp_addr & 0xFF00) { // branch to same page
                 cpu.pc = procedure.tmp_addr;
                 cpu.prefetch = Some(cpu.fetch(bus));
@@ -500,9 +569,7 @@ fn bpl(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         _ => ()
     }
 }
-fn brk(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bvc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn bvs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+
 fn clc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn cld(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     match procedure.cycle {
@@ -524,7 +591,7 @@ fn dec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { uni
 fn dex(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     match procedure.cycle {
         2 => {
-            cpu.x -= 1;
+            cpu.x = cpu.x.wrapping_sub(1);
             cpu.status.set(StatusReg::Zero, cpu.x == 0);
             cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
             cpu.prefetch = Some(cpu.fetch(bus));
@@ -533,11 +600,54 @@ fn dex(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         _ => ()
     }
 }
-fn dey(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn eor(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn dey(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.y = cpu.y.wrapping_sub(1);
+            cpu.status.set(StatusReg::Zero, cpu.y == 0);
+            cpu.status.set(StatusReg::Negative, cpu.y & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn eor(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        cpu.acc ^= bus.read(addr);
+        
+        cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+        cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
 fn inc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn inx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn iny(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn inx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.x = cpu.x.wrapping_add(1);
+            cpu.status.set(StatusReg::Zero, cpu.x == 0);
+            cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn iny(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.y = cpu.y.wrapping_add(1);
+            cpu.status.set(StatusReg::Zero, cpu.y == 0);
+            cpu.status.set(StatusReg::Negative, cpu.y & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
 fn isb(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn jmp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     match procedure.mode {
@@ -574,7 +684,22 @@ fn jmp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         _ => panic!("Invalid mode!")
     }
 }
-fn jsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn jsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => procedure.tmp0 = cpu.fetch(bus),
+        3 => {bus.read(0x100 + cpu.sp.0 as u16);}, // discarded read, may be useful later for monitoring bus activity
+        4 => cpu.stack_push(bus, (cpu.pc >> 8) as u8),
+        5 => cpu.stack_push(bus, (cpu.pc & 0xFF) as u8),
+        6 => {
+            procedure.tmp1 = cpu.fetch(bus);
+            
+            cpu.pc = ((procedure.tmp1 as u16) << 8) | (procedure.tmp0 as u16);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
 fn las(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn lax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn lda(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
@@ -599,8 +724,47 @@ fn ldx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         procedure.done = true;
     }
 }
-fn ldy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn lsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn ldy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        cpu.y = bus.read(addr);
+        
+        cpu.status.set(StatusReg::Zero, cpu.y == 0);
+        cpu.status.set(StatusReg::Negative, cpu.y & 0x80 > 0);
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
+fn lsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.mode {
+        Accumulator => {
+            match procedure.cycle {
+                2 => {
+                    cpu.status.set(StatusReg::Carry, cpu.acc & 0x01 != 0);
+                    cpu.acc >>= 1;
+                    
+                    cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+                    cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                },
+                _ => ()
+            }
+        },
+        _ => {
+            if let Some(addr) = read_modify_write(procedure, cpu, bus) {
+                cpu.status.set(StatusReg::Carry, procedure.tmp0 & 0x01 != 0);
+                procedure.tmp0 >>= 1;
+                
+                cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
+                cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);
+                bus.write(addr, procedure.tmp0);
+                
+                procedure.done = true;
+            }
+        }
+    }
+}
 fn lxa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn nop(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn ora(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
@@ -610,15 +774,113 @@ fn pla(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { uni
 fn plp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn rla(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn rra(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn rol(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn ror(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rol(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.mode {
+        Accumulator => {
+            match procedure.cycle {
+                2 => {
+                    let c = cpu.status.contains(StatusReg::Carry) as u8;
+                    cpu.status.set(StatusReg::Carry, cpu.acc & 0x80 != 0);
+                    cpu.acc = ((cpu.acc << 1) & 0xFE) | c;
+                    
+                    cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+                    cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                },
+                _ => ()
+            }
+        },
+        _ => {
+            if let Some(addr) = read_modify_write(procedure, cpu, bus) {
+                let c = cpu.status.contains(StatusReg::Carry) as u8;
+                cpu.status.set(StatusReg::Carry, procedure.tmp0 & 0x80 != 0);
+                procedure.tmp0 = ((procedure.tmp0 << 1) & 0xFE) | c;
+                
+                cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
+                cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);
+                bus.write(addr, procedure.tmp0);
+                
+                procedure.done = true;
+            }
+        }
+    }
+}
+fn ror(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.mode {
+        Accumulator => {
+            match procedure.cycle {
+                2 => {
+                    let c = cpu.status.contains(StatusReg::Carry) as u8;
+                    cpu.status.set(StatusReg::Carry, cpu.acc & 0x01 != 0);
+                    cpu.acc = (c << 7) | ((cpu.acc >> 1) & 0x7F);
+                    
+                    cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+                    cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+                    cpu.prefetch = Some(cpu.fetch(bus));
+                    procedure.done = true;
+                },
+                _ => ()
+            }
+        },
+        _ => {
+            if let Some(addr) = read_modify_write(procedure, cpu, bus) {
+                let c = cpu.status.contains(StatusReg::Carry) as u8;
+                cpu.status.set(StatusReg::Carry, procedure.tmp0 & 0x01 != 0);
+                procedure.tmp0 = (c << 7) | ((procedure.tmp0 >> 1) & 0x7F);
+                
+                cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
+                cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);
+                bus.write(addr, procedure.tmp0);
+                
+                procedure.done = true;
+            }
+        }
+    }
+}
 fn rti(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn rts(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn sax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn sbc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sbc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        let data = bus.read(addr);
+        let result = (cpu.acc as u16).wrapping_sub(data as u16).wrapping_sub((!cpu.status.contains(StatusReg::Carry)) as u16);
+        
+        cpu.status.set(StatusReg::Carry, result & 0x100 == 0);
+        cpu.status.set(StatusReg::Overflow, (cpu.acc ^ data) & (cpu.acc ^ result as u8) & 0x80 != 0);
+        cpu.status.set(StatusReg::Zero, result == 0);
+        cpu.status.set(StatusReg::Negative, result & 0x80 > 0);
+        if cpu.status.contains(StatusReg::Decimal) {
+            unimplemented!();
+        } else {
+            cpu.acc = result as u8;
+        }
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
 fn sbx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn sec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn sed(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn sec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.status.set(StatusReg::Carry, true);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn sed(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.status.set(StatusReg::Decimal, true);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
 fn sei(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     match procedure.cycle {
         2 => {
@@ -641,14 +903,93 @@ fn sta(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         procedure.done = true;
     }
 }
-fn stx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn sty(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn tax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn tay(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn tsx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn txa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn txs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn tya(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn stx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        bus.write(addr, cpu.x);
+        procedure.done = true;
+    }
+}
+fn sty(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        bus.write(addr, cpu.y);
+        procedure.done = true;
+    }
+}
+fn tax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.x = cpu.acc;
+            
+            cpu.status.set(StatusReg::Zero, cpu.x == 0);
+            cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn tay(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.y = cpu.acc;
+            
+            cpu.status.set(StatusReg::Zero, cpu.y == 0);
+            cpu.status.set(StatusReg::Negative, cpu.y & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn tsx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.x = cpu.sp.0;
+            
+            cpu.status.set(StatusReg::Zero, cpu.x == 0);
+            cpu.status.set(StatusReg::Negative, cpu.x & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn txa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.acc = cpu.x;
+            
+            cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+            cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn txs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.sp.0 = cpu.x;
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
+fn tya(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.acc = cpu.y;
+            
+            cpu.status.set(StatusReg::Zero, cpu.acc == 0);
+            cpu.status.set(StatusReg::Negative, cpu.acc & 0x80 > 0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
 
 fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) -> Option<u16> {
     match procedure.mode {
@@ -714,4 +1055,98 @@ fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut
 
 fn addr_concat(high: u8, low: u8) -> u16 {
     ((high as u16) << 8) | (low as u16)
+}
+
+fn read_modify_write(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) -> Option<u16> {
+    match procedure.mode {
+        Zero => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp_addr = addr_concat(0x00, cpu.fetch(bus));
+                    None
+                },
+                3 => {
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                4 => {
+                    bus.write(procedure.tmp_addr, procedure.tmp0);
+                    None
+                },
+                5 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        },
+        Absolute => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    procedure.tmp1 = cpu.fetch(bus);
+                    None
+                },
+                4 => {
+                    procedure.tmp_addr = addr_concat(procedure.tmp1, procedure.tmp0);
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                5 => {
+                    bus.write(procedure.tmp_addr, procedure.tmp0);
+                    None
+                },
+                6 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        },
+        ZeroX => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    procedure.tmp_addr = addr_concat(0x00, procedure.tmp0);
+                    None
+                },
+                3 => {
+                    bus.read(procedure.tmp_addr);
+                    None
+                },
+                4 => {
+                    procedure.tmp_addr = ((procedure.tmp0 as u16) + (cpu.x as u16)) & 0x00FF;
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                5 => {
+                    bus.write(procedure.tmp_addr, procedure.tmp0);
+                    None
+                },
+                6 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        },
+        AbsoluteX => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    procedure.tmp1 = cpu.fetch(bus);
+                    None
+                },
+                4 => {
+                    procedure.tmp_addr = addr_concat(procedure.tmp1, procedure.tmp0) + cpu.x as u16;
+                    bus.read(procedure.tmp_addr);
+                    None
+                },
+                5 => {
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                6 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        }
+        _ => unimplemented!()
+    }
 }

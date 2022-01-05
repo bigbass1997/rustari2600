@@ -3,7 +3,6 @@
 
 use std::fmt::{Debug, Formatter};
 use std::num::Wrapping;
-use std::ops::SubAssign;
 use crate::arch::BusAccessable;
 use crate::{Bus, InfCell};
 use bitflags::bitflags;
@@ -147,6 +146,10 @@ impl Cpu {
     }
     
     pub fn cycle(&mut self, bus_cell: &InfCell<Bus>) {
+        if !self.rdy {
+            return;
+        }
+        
         let bus = bus_cell.get_mut();
         //let bus_ref = bus_cell.get_mut();
         
@@ -460,6 +463,7 @@ impl Cpu {
         self.sp -= Wrapping(1);
     }
     
+    #[allow(dead_code)]
     fn stack_pop(&mut self, bus: &mut Bus) -> u8 {
         self.sp += Wrapping(1);
         bus.read(0x100 + self.sp.0 as u16)

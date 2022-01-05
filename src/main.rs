@@ -22,7 +22,6 @@ fn main() {
     let bus = bus_cell.get_mut();
     let bus_ref = bus_cell.get_mut();
     
-    bus.tia.cpu_counter = 0;
     bus.cart.set_rom(&std::fs::read(PathBuf::from(matches.value_of("rom").unwrap())).unwrap());
     bus.cpu.init_pc(bus_ref);
     

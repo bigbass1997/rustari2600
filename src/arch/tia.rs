@@ -1,12 +1,36 @@
 use crate::arch::BusAccessable;
 use crate::{Bus, Cpu, InfCell};
 
+#[derive(Copy, Clone, Debug, Default)]
+pub struct CycleCounter {
+    osc: usize,
+    div3: u8,
+    scanline: usize,
+    color_clock: usize,
+    pub(crate) debug_cpu_counter: usize,
+}
+impl CycleCounter {
+    fn osc_cycle(&mut self) {
+        self.osc += 1;
+        self.div3 += 1;
+        
+        self.color_clock += 1;
+        if self.color_clock == 228 {
+            self.scanline += 1;
+            self.color_clock = 0;
+            
+            if self.scanline == 262 {
+                self.scanline = 0;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Tia {
     vsync: bool,
     wsync: bool,
-    div3_counter: u8,
-    pub(crate) cpu_counter: isize, // debug only
+    pub cycles: CycleCounter,
 }
 impl Tia {
     /// Perform one clock cycle of the TIA chip. This chip contains a clock divider which
@@ -27,13 +51,17 @@ impl Tia {
         
         cpu.rdy = !self.wsync;
         
-        self.div3_counter += 1;
-        if self.div3_counter == 3 {
-            println!("Cycles: {}", self.cpu_counter);
-            self.cpu_counter += 1;
+        if self.cycles.div3 == 3 || self.cycles.osc == 0 {
+            println!("Cycles: {}", self.cycles.debug_cpu_counter);
+            self.cycles.debug_cpu_counter += 1;
             
-            self.div3_counter = 0;
+            self.cycles.div3 = 0;
             cpu.cycle(bus_cell);
+        }
+        println!("SCANLINE: {}, HORIZ: {}", self.cycles.scanline, self.cycles.color_clock);
+        self.cycles.osc_cycle();
+        if self.cycles.color_clock == 0 {
+            self.wsync = false;
         }
     }
 }
@@ -43,7 +71,7 @@ impl BusAccessable for Tia {
         match addr {
             0x00 => /*self.vsync = (data & 0b10) != 0*/ unimplemented!(),
             0x01 => unimplemented!(),
-            0x02 => /*self.wsync = true*/ todo!(),
+            0x02 => self.wsync = true,
             0x03 => unimplemented!(),
            /* 0x04 => unimplemented!(),
             0x05 => unimplemented!(),

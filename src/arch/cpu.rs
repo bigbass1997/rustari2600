@@ -464,7 +464,7 @@ impl Cpu {
     }
     
     #[allow(dead_code)]
-    fn stack_pop(&mut self, bus: &mut Bus) -> u8 {
+    fn stack_pull(&mut self, bus: &mut Bus) -> u8 {
         self.sp += Wrapping(1);
         bus.read(0x100 + self.sp.0 as u16)
     }
@@ -842,8 +842,40 @@ fn ror(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
         }
     }
 }
-fn rti(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn rts(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn rti(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    todo!("TODO: TEST THIS");
+    match procedure.cycle {
+        2 => {cpu.fetch(bus);},
+        3 => {bus.read(0x100 + cpu.sp.0 as u16);}
+        4 => {cpu.stack_pull(bus);}, // pull P from stack (what is P?)
+        5 => procedure.tmp0 = cpu.stack_pull(bus),
+        6 => {
+            procedure.tmp1 = cpu.stack_pull(bus);
+            
+            cpu.pc = addr_concat(procedure.tmp1, procedure.tmp0);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            
+            procedure.done = true;
+        }
+        _ => (),
+    }
+}
+fn rts(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {cpu.fetch(bus);},
+        3 => {bus.read(0x100 + cpu.sp.0 as u16);}
+        4 => procedure.tmp0 = cpu.stack_pull(bus),
+        5 => procedure.tmp1 = cpu.stack_pull(bus),
+        6 => {
+            cpu.pc = addr_concat(procedure.tmp1, procedure.tmp0) + 1;
+            bus.read(cpu.pc);
+            cpu.prefetch = Some(cpu.fetch(bus));
+            
+            procedure.done = true;
+        }
+        _ => (),
+    }
+}
 fn sax(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn sbc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = effective_addr(procedure, cpu, bus) {
@@ -903,18 +935,27 @@ fn slo(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { uni
 fn sre(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
 fn sta(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        if ((procedure.mode == AbsoluteX || procedure.mode == AbsoluteY) && procedure.cycle == 4) || (procedure.mode == IndirectY && procedure.cycle == 5) {
+            return; // consume extra cycle for early-exit AbsoluteX, AbsoluteY, or IndirectY
+        }
         bus.write(addr, cpu.acc);
         procedure.done = true;
     }
 }
 fn stx(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        if (procedure.mode == AbsoluteX || procedure.mode == AbsoluteY) && procedure.cycle == 4 {
+            return;
+        }
         bus.write(addr, cpu.x);
         procedure.done = true;
     }
 }
 fn sty(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        if (procedure.mode == AbsoluteX || procedure.mode == AbsoluteY) && procedure.cycle == 4 {
+            return;
+        }
         bus.write(addr, cpu.y);
         procedure.done = true;
     }
@@ -1036,13 +1077,50 @@ fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut
                 _ => None
             }
         },
+        IndirectX => { 
+            unimplemented!();
+        },
+        AbsoluteX | AbsoluteY => { // All write instructions should make sure they use 5 cycles for this mode
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    procedure.tmp1 = cpu.fetch(bus);
+                    None
+                },
+                4 => {
+                    let index = if procedure.mode == AbsoluteX {
+                        cpu.x
+                    } else {
+                        cpu.y
+                    };
+                    
+                    let (result, carry) = procedure.tmp0.overflowing_add(index);
+                    procedure.tmp_addr = addr_concat(procedure.tmp1 + carry as u8, result);
+                    
+                    if !carry {
+                        Some(procedure.tmp_addr)
+                    } else {
+                        bus.read(procedure.tmp_addr);
+                        None
+                    }
+                },
+                5 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        },
         ZeroX | ZeroY => {
             match procedure.cycle {
                 2 => {
                     procedure.tmp0 = cpu.fetch(bus);
                     None
                 },
-                // 3 => { read bus at (0x00, tmp0), but ignore data }
+                3 => {
+                    //bus.read(addr_concat(0x00, procedure.tmp0)); //TODO: uncomment once Tia.read() is implemented
+                    None
+                }
                 4 => {
                     if procedure.mode == ZeroX {
                         Some(((procedure.tmp0 as u16) + (cpu.x as u16)) & 0x00FF)
@@ -1052,7 +1130,36 @@ fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut
                 }
                 _ => None
             }
-        }
+        },
+        IndirectY => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp_addr = addr_concat(0x00, cpu.fetch(bus));
+                    None
+                },
+                3 => {
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                4 => {
+                    procedure.tmp1 = bus.read((procedure.tmp_addr + 1) & 0x00FF);
+                    None
+                },
+                5 => {
+                    let (result, carry) = procedure.tmp0.overflowing_add(cpu.y);
+                    procedure.tmp_addr = addr_concat(procedure.tmp1 + carry as u8, result);
+                    
+                    if !carry {
+                        Some(procedure.tmp_addr)
+                    } else {
+                        bus.read(procedure.tmp_addr);
+                        None
+                    }
+                },
+                6 => Some(procedure.tmp_addr),
+                _ => None
+            }
+        },
         _ => unimplemented!()
     }
 }

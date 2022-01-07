@@ -3,16 +3,19 @@ use crate::{Bus, Cpu, InfCell};
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct CycleCounter {
-    osc: usize,
-    div3: u8,
-    scanline: usize,
-    color_clock: usize,
+    pub(crate) osc: usize,
+    pub(crate) div3: u8,
+    pub(crate) scanline: usize,
+    pub(crate) color_clock: usize,
     pub(crate) debug_cpu_counter: usize,
 }
 impl CycleCounter {
     fn osc_cycle(&mut self) {
         self.osc += 1;
         self.div3 += 1;
+        if self.div3 == 3 {
+            self.div3 = 0;
+        }
         
         self.color_clock += 1;
         if self.color_clock == 228 {
@@ -24,13 +27,28 @@ impl CycleCounter {
             }
         }
     }
+    
+    fn pixel_index(&self) -> usize {
+        (self.scanline * 228) + self.color_clock
+    }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Tia {
     vsync: bool,
     wsync: bool,
     pub cycles: CycleCounter,
+    pub framebuffer: [u32; 228 * 262],
+    pub fb_color: u32,
+}
+impl Default for Tia {
+    fn default() -> Self { Self {
+        vsync: false,
+        wsync: false,
+        cycles: Default::default(),
+        framebuffer: [0u32; 228 * 262],
+        fb_color: 0,
+    }}
 }
 impl Tia {
     /// Perform one clock cycle of the TIA chip. This chip contains a clock divider which
@@ -46,18 +64,37 @@ impl Tia {
         let bus_ref = bus_cell.get_mut();
         let mut cpu = &mut bus.cpu;
         
+        // === OSC CLOCK === //
         //TODO: TIA stuff here
+        /*let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
+        if self.cycles.scanline < 40 {
+            *pixel = 0x00767676;
+        } else if self.cycles.scanline >= 232 {
+            *pixel = 0x009A9A9A;
+        } else if self.cycles.color_clock >= 68 && self.cycles.scanline >= 40 && self.cycles.scanline < 232 {
+            *pixel = self.fb_color;
+            
+            self.fb_color += 1000;
+            if self.fb_color > 0x00FFFFFF {
+                self.fb_color = 0;
+            }
+        }*/
         
         
         cpu.rdy = !self.wsync;
         
-        if self.cycles.div3 == 3 || self.cycles.osc == 0 {
+        if self.cycles.div3 == 0 {
+            // === Phi 0 CLOCK === //
             println!("Cycles: {}", self.cycles.debug_cpu_counter);
             self.cycles.debug_cpu_counter += 1;
             
-            self.cycles.div3 = 0;
             cpu.cycle(bus_cell);
+            
+            // === Phi 2 CLOCK === //
+            //TODO
         }
+        
+        
         println!("SCANLINE: {}, HORIZ: {}", self.cycles.scanline, self.cycles.color_clock);
         self.cycles.osc_cycle();
         if self.cycles.color_clock == 0 {
@@ -69,7 +106,7 @@ impl BusAccessable for Tia {
     fn write(&mut self, addr: u16, data: u8) {
         println!("TIA Write: {:02X} to {:04X}", data, addr);
         match addr {
-            0x00 => /*self.vsync = (data & 0b10) != 0*/ unimplemented!(),
+            0x00 => self.vsync = (data & 0b10) != 0,
             0x01 => unimplemented!(),
             0x02 => self.wsync = true,
             0x03 => unimplemented!(),

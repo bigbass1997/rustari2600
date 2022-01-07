@@ -63,6 +63,7 @@ impl Tia {
         let bus = bus_cell.get_mut();
         let bus_ref = bus_cell.get_mut();
         let mut cpu = &mut bus.cpu;
+        let mut pia = &mut bus.pia;
         
         // === OSC CLOCK === //
         //TODO: TIA stuff here
@@ -91,7 +92,7 @@ impl Tia {
             cpu.cycle(bus_cell);
             
             // === Phi 2 CLOCK === //
-            //TODO
+            pia.cycle(bus_cell);
         }
         
         
@@ -152,12 +153,29 @@ impl BusAccessable for Tia {
             0x2B => unimplemented!(),
             0x2C => (), //TODO*/
             _ => {
-                println!("TIA: Invalid write to {:#04X} ({:#02X})", addr, data);
+                println!("TIA: Invalid write to {:04X} ({:02X})", addr, data);
             }
         }
     }
 
     fn read(&self, addr: u16) -> u8 {
-        todo!()
+        println!("TIA Read from {:04X}", addr);
+        match addr {
+            0x30 => unimplemented!(), // CXM0P
+            0x31 => unimplemented!(), // CXM1P
+            0x32 => 0b00000000, // CXP0FB
+            0x33 => 0b00000000, // CXP1FB
+            0x34 => 0b00000000, // CXM0FB
+            0x35 => 0b00000000, // CXM1FB
+            0x36 => 0b00000000, // CXBLPF
+            0x37 => unimplemented!(), // CXPPMM
+            0x38 => unimplemented!(),
+            0x39 => unimplemented!(),
+            0x3A => unimplemented!(),
+            0x3B => unimplemented!(),
+            0x3C => unimplemented!(),
+            0x3D => unimplemented!(),
+            _ => panic!("TIA: Invalid read from {:04X}", addr)
+        }
     }
 }

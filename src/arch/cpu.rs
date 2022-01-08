@@ -141,8 +141,6 @@ impl Default for Cpu {
 impl Cpu {
     pub fn init_pc(&mut self, bus: &mut Bus) {
         self.pc = ((bus.cart.read(0xFFFD) as u16) << 8) | (bus.cart.read(0xFFFC) as u16);
-        
-        //self.status = StatusReg::from_bits_truncate(0b01011101); // debugging, matches Stella's initial state
     }
     
     pub fn cycle(&mut self, bus_cell: &InfCell<Bus>) {
@@ -157,10 +155,8 @@ impl Cpu {
             if self.prefetch.is_none() { // if next instruction wasn't prefetched at end of previous, we must fetch now (this is considered the first cycle of procedure)
                 self.prefetch = Some(self.fetch(bus));
                 
-                println!("Fetched! PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, self.prefetch.unwrap(), self.status, self.acc, self.x, self.y, self.sp);
+                //println!("Fetched! PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, self.prefetch.unwrap(), self.status, self.acc, self.x, self.y, self.sp);
                 self.fetch_needed = true;
-                
-                //return;
             }
             
             let opcode = self.prefetch.unwrap();
@@ -430,13 +426,10 @@ impl Cpu {
             
             _ => panic!("Attempt to run invalid/unimplemented opcode! PC: {:#06X}, Op: {:#06X}", self.pc, opcode)
         }); // decode opcode into an instruction procedure (this doesn't consume cycles)
-            /*if self.fetch_needed {
-                self.procedure.as_mut().unwrap().cycle += 1; // if a fetch was required to get opcode, then this instruction is now 
-            }*/
             
             // debugging
             if !self.fetch_needed {
-                println!("         PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, opcode, self.status, self.acc, self.x, self.y, self.sp);
+                //println!("         PC: {:04X}, Op: {:02X}, Status: {}, ACC: {:02X}, X: {:02X}, Y: {:02X}, SP: {:02X}", self.pc - 1, opcode, self.status, self.acc, self.x, self.y, self.sp);
             }
             self.fetch_needed = false;
         }

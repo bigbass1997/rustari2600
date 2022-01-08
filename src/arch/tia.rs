@@ -41,6 +41,11 @@ pub struct Tia {
     vsync_trigger: bool,
     vblank: bool,
     wsync: bool,
+    
+    pf0: u8,
+    pf1: u8,
+    pf2: u8,
+    
     pub cycles: CycleCounter,
     pub framebuffer: [u32; 228 * 262],
     pub fb_color: u32,
@@ -51,6 +56,11 @@ impl Default for Tia {
         vsync_trigger: false,
         vblank: false,
         wsync: false,
+        
+        pf0: 0,
+        pf1: 0,
+        pf2: 0,
+        
         cycles: Default::default(),
         framebuffer: [0u32; 228 * 262],
         fb_color: 0,
@@ -87,13 +97,14 @@ impl Tia {
             }
         }*/
         if !self.vblank && self.cycles.color_clock >= 68 && bus.tia.cycles.frame_counter > 0 {
-            let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
+            /*let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
             *pixel = self.fb_color;
             
             self.fb_color += 1000;
             if self.fb_color > 0x00FFFFFF {
                 self.fb_color = 0;
-            }
+            }*/
+            self.framebuffer[self.cycles.pixel_index()] = ((self.pf0 as u32) << 16) | ((self.pf1 as u32) << 8) | (self.pf2 as u32);
         }
         
         
@@ -101,7 +112,7 @@ impl Tia {
         
         if self.cycles.div3 == 0 {
             // === Phi 0 CLOCK === //
-            println!("Cycles: {}", self.cycles.frame_cpu_counter);
+            //println!("Cycles: {}", self.cycles.frame_cpu_counter);
             self.cycles.frame_cpu_counter += 1;
             
             cpu.cycle(bus_cell);
@@ -111,7 +122,7 @@ impl Tia {
         }
         
         
-        println!("FRAME: {}, SCANLINE: {}, HORIZ: {}, INTIM: {:02X}, INTIM_COUNTER: {:04X}, INTERVAL: {} ({})", self.cycles.frame_counter, self.cycles.scanline, self.cycles.color_clock, bus.pia.intim, bus.pia.intim_counter, bus.pia.intim_interval, bus.pia.intim_interval_active);
+        //println!("FRAME: {}, SCANLINE: {}, HORIZ: {}, INTIM: {:02X}, INTIM_COUNTER: {:04X}, INTERVAL: {} ({})", self.cycles.frame_counter, self.cycles.scanline, self.cycles.color_clock, bus.pia.intim, bus.pia.intim_counter, bus.pia.intim_interval, bus.pia.intim_interval_active);
         self.cycles.osc_cycle();
         if self.cycles.color_clock == 0 {
             self.wsync = false;
@@ -120,9 +131,9 @@ impl Tia {
             self.cycles.frame_cpu_counter = 0;
             self.cycles.scanline = 0;
             self.cycles.frame_counter += 1;
-            println!("=================================================================");
-            println!("======================= NEW FRAME STARTED =======================");
-            println!("=================================================================");
+            //println!("=================================================================");
+            //println!("======================= NEW FRAME STARTED =======================");
+            //println!("=================================================================");
             self.vsync_trigger = false;
         }
     }
@@ -149,11 +160,11 @@ impl BusAccessable for Tia {
             0x09 => unimplemented!(),
             0x0A => unimplemented!(),
             0x0B => unimplemented!(),
-            0x0C => unimplemented!(),
-            0x0D => unimplemented!(),
-            0x0E => unimplemented!(),
-            0x0F => unimplemented!(),
-            0x10 => unimplemented!(),
+            0x0C => unimplemented!(),*/
+            0x0D => self.pf0 = data,
+            0x0E => self.pf1 = data,
+            0x0F => self.pf2 = data,
+            /*0x10 => unimplemented!(),
             0x11 => unimplemented!(),
             0x12 => unimplemented!(),
             0x13 => unimplemented!(),

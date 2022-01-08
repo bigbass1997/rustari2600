@@ -16,7 +16,7 @@ impl BusAccessable for Cartridge {
     fn write(&mut self, addr: u16, data: u8) {
         todo!()
     }
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         self.rom[(addr & 0x0FFF) as usize]
     }
 }

@@ -59,7 +59,7 @@ fn main() {
 }
 
 fn update_window(bus: &mut Bus, window: &mut Window) -> bool {
-    if bus.tia.cycles.color_clock == 0 && bus.tia.cycles.scanline == 0 {
+    if bus.tia.cycles.color_clock == 0 /*&& bus.tia.cycles.scanline == 0*/ {
         window.update_with_buffer(&bus.tia.framebuffer, 228, 262).unwrap();
     }
     

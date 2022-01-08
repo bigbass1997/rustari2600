@@ -7,7 +7,8 @@ pub struct CycleCounter {
     pub(crate) div3: u8,
     pub(crate) scanline: usize,
     pub(crate) color_clock: usize,
-    pub(crate) debug_cpu_counter: usize,
+    pub(crate) frame_cpu_counter: usize,
+    pub(crate) frame_counter: usize,
 }
 impl CycleCounter {
     fn osc_cycle(&mut self) {
@@ -24,6 +25,7 @@ impl CycleCounter {
             
             if self.scanline == 262 {
                 self.scanline = 0;
+                //self.frame_counter += 1;
             }
         }
     }
@@ -36,6 +38,8 @@ impl CycleCounter {
 #[derive(Clone, Debug)]
 pub struct Tia {
     vsync: bool,
+    vsync_trigger: bool,
+    vblank: bool,
     wsync: bool,
     pub cycles: CycleCounter,
     pub framebuffer: [u32; 228 * 262],
@@ -44,6 +48,8 @@ pub struct Tia {
 impl Default for Tia {
     fn default() -> Self { Self {
         vsync: false,
+        vsync_trigger: false,
+        vblank: false,
         wsync: false,
         cycles: Default::default(),
         framebuffer: [0u32; 228 * 262],
@@ -80,14 +86,23 @@ impl Tia {
                 self.fb_color = 0;
             }
         }*/
+        if !self.vblank && self.cycles.color_clock >= 68 && bus.tia.cycles.frame_counter > 0 {
+            let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
+            *pixel = self.fb_color;
+            
+            self.fb_color += 1000;
+            if self.fb_color > 0x00FFFFFF {
+                self.fb_color = 0;
+            }
+        }
         
         
         cpu.rdy = !self.wsync;
         
         if self.cycles.div3 == 0 {
             // === Phi 0 CLOCK === //
-            println!("Cycles: {}", self.cycles.debug_cpu_counter);
-            self.cycles.debug_cpu_counter += 1;
+            println!("Cycles: {}", self.cycles.frame_cpu_counter);
+            self.cycles.frame_cpu_counter += 1;
             
             cpu.cycle(bus_cell);
             
@@ -96,10 +111,20 @@ impl Tia {
         }
         
         
-        println!("SCANLINE: {}, HORIZ: {}", self.cycles.scanline, self.cycles.color_clock);
+        println!("FRAME: {}, SCANLINE: {}, HORIZ: {}, INTIM: {:02X}, INTIM_COUNTER: {:04X}, INTERVAL: {} ({})", self.cycles.frame_counter, self.cycles.scanline, self.cycles.color_clock, bus.pia.intim, bus.pia.intim_counter, bus.pia.intim_interval, bus.pia.intim_interval_active);
         self.cycles.osc_cycle();
         if self.cycles.color_clock == 0 {
             self.wsync = false;
+        }
+        if self.vsync_trigger && !self.vsync {
+            self.cycles.frame_cpu_counter = 0;
+            self.cycles.scanline = 0;
+            self.cycles.frame_counter += 1;
+            println!("=================================================================");
+            println!("======================= NEW FRAME STARTED =======================");
+            println!("=================================================================");
+            self.vsync_trigger = false;
+            if self.cycles.frame_counter == 2 { panic!(); }
         }
     }
 }
@@ -107,8 +132,14 @@ impl BusAccessable for Tia {
     fn write(&mut self, addr: u16, data: u8) {
         println!("TIA Write: {:02X} to {:04X}", data, addr);
         match addr {
-            0x00 => self.vsync = (data & 0b10) != 0,
-            0x01 => unimplemented!(),
+            0x00 => {
+                let past = self.vsync;
+                self.vsync = (data & 0b00000010) != 0;
+                if !past && self.vsync {
+                    self.vsync_trigger = true;
+                }
+            },
+            0x01 => self.vblank = (data & 0b11000010) != 0,
             0x02 => self.wsync = true,
             0x03 => unimplemented!(),
            /* 0x04 => unimplemented!(),
@@ -158,7 +189,7 @@ impl BusAccessable for Tia {
         }
     }
 
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         println!("TIA Read from {:04X}", addr);
         match addr {
             0x30 => unimplemented!(), // CXM0P

@@ -10,7 +10,7 @@ pub mod cartridge;
 
 pub trait BusAccessable {
     fn write(&mut self, addr: u16, data: u8);
-    fn read(&self, addr: u16) -> u8;
+    fn read(&mut self, addr: u16) -> u8;
 }
 
 #[derive(Clone, Default, Debug)]
@@ -32,7 +32,7 @@ impl BusAccessable for Bus {
         }
     }
 
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x000D | 0x0030..=0x003D => self.tia.read(addr),
             0x0080..=0x00FF | 0x0280..=0x0297 => self.pia.read(addr),

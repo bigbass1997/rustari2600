@@ -477,7 +477,7 @@ impl BusAccessable for Cpu {
         }
     }
 
-    fn read(&self, addr: u16) -> u8 {
+    fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0100..=0x01FF => self.stack[(addr & 0x00FF) as usize],
             _ => panic!("Read attempt to invalid address {:#06X}", addr),
@@ -1168,8 +1168,28 @@ fn effective_addr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut
                 _ => None
             }
         },
-        IndirectX => { 
-            unimplemented!();
+        IndirectX => {
+            match procedure.cycle {
+                2 => {
+                    procedure.tmp0 = cpu.fetch(bus);
+                    None
+                },
+                3 => {
+                    bus.read(addr_concat(0x00, procedure.tmp0));
+                    None
+                },
+                4 => {
+                    procedure.tmp_addr = addr_concat(0x00, procedure.tmp0.wrapping_add(cpu.x));
+                    procedure.tmp0 = bus.read(procedure.tmp_addr);
+                    None
+                },
+                5 => {
+                    procedure.tmp1 = bus.read((procedure.tmp_addr + 1) & 0x00FF);
+                    None
+                }
+                6 => Some(addr_concat(procedure.tmp1, procedure.tmp0)),
+                _ => None,
+            }
         },
         AbsoluteX | AbsoluteY => { // All write instructions should make sure they use 5 cycles for this mode
             match procedure.cycle {

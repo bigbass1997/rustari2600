@@ -25,6 +25,7 @@ impl BusAccessable for Bus {
     fn write(&mut self, addr: u16, data: u8) {
         match addr {
             0x0000..=0x002C => self.tia.write(addr, data),
+            0x002D..=0x002F => (), // apparently some games will occationally write into the void?
             0x0030..=0x003D => (), // valid, but also, read-only registers
             0x003E..=0x007F => (), // apparently some games will occationally write into the void?
             0x0080..=0x00FF | 0x0280..=0x0297 => self.pia.write(addr, data),

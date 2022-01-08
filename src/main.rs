@@ -43,6 +43,11 @@ fn main() {
     loop {
         let start = Instant::now();
         for _ in 0..(3584160/60) {
+            if window.is_key_down(Key::R) {
+                bus.pia.swchb &= 0b11111110;
+            } else {
+                bus.pia.swchb |= 0b00000001;
+            }
             bus.tia.cycle(&bus_cell);
             
             if update_window(bus, &mut window) {
@@ -52,14 +57,14 @@ fn main() {
         
         let elapsed = start.elapsed();
         if elapsed.as_micros() < 1000000/60 {
-            std::thread::sleep(Duration::from_micros((999940 - elapsed.as_micros() as u64)/60))
+            //std::thread::sleep(Duration::from_micros((999940 - elapsed.as_micros() as u64)/60))
         }
-        println!("time to simulate 1/60 second: {:.6}sec ({}us)", start.elapsed().as_secs_f64(), elapsed.as_micros());
+        println!("time to simulate 1/60 second: {:.6}sec ({}us) ({:.3}fps)", start.elapsed().as_secs_f64(), elapsed.as_micros(), 1.0 / start.elapsed().as_secs_f64());
     }
 }
 
 fn update_window(bus: &mut Bus, window: &mut Window) -> bool {
-    if bus.tia.cycles.color_clock == 0 /*&& bus.tia.cycles.scanline == 0*/ {
+    if bus.tia.cycles.color_clock == 0 && bus.tia.cycles.scanline == 0 {
         window.update_with_buffer(&bus.tia.framebuffer, 228, 262).unwrap();
     }
     

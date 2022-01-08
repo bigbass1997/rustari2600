@@ -9,6 +9,8 @@ pub struct Pia {
     pub(crate) intim_interval_active: bool,
     pub(crate) intim_counter: usize,
     pub(crate) intim_trigger: bool,
+    pub swcha: u8,
+    pub swchb: u8,
 }
 impl Default for Pia {
     fn default() -> Self { Self {
@@ -18,6 +20,8 @@ impl Default for Pia {
         intim_interval_active: true,
         intim_counter: 1,
         intim_trigger: false,
+        swcha: 0b11111111,
+        swchb: 0b00111111,
     }}
 }
 impl Pia {
@@ -72,9 +76,9 @@ impl BusAccessable for Pia {
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0080..=0x00FF => self.ram[(addr & 0x007F) as usize],
-            0x0280 => 0b11111111, // SWCHA
+            0x0280 => self.swcha, // SWCHA
             0x0281 => unimplemented!(),
-            0x0282 => 0b00111111, // SWCHB
+            0x0282 => self.swchb, // SWCHB
             0x0283 => unimplemented!(),
             0x0284 => {
                 self.intim_interval_active = true;

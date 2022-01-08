@@ -854,7 +854,15 @@ fn lsr(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     }
 }
 fn lxa(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn nop(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn nop(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    match procedure.cycle {
+        2 => {
+            cpu.prefetch = Some(cpu.fetch(bus));
+            procedure.done = true;
+        },
+        _ => ()
+    }
+}
 fn ora(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = effective_addr(procedure, cpu, bus) {
         cpu.acc |= bus.read(addr);

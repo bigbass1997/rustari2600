@@ -1,6 +1,32 @@
 use crate::arch::BusAccessable;
 use crate::{Bus, Cpu, InfCell};
 
+pub const NTSC_COLOR_LUT: [u32; 128] = [
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,//
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,//
+    
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    
+    0x78005C, 0x8C2074, 0xA03C88, 0xB0589C, 0xC070B0, 0xD084C0, 0xDC9CD0, 0xECB0E0,//
+    0x480078, 0x602090, 0x783CA4, 0x8C58B8, 0xA070CC, 0xB484DC, 0xC49CEC, 0xD4B0FC,//
+    
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+    0x000000, 0x404040, 0x6C6C6C, 0x909090, 0xB0B0B0, 0xC8C8C8, 0xDCDCDC, 0xECECEC,
+    0x444400, 0x646410, 0x848424, 0xA0A034, 0xB8B840, 0xD0D050, 0xE8E85C, 0xFCFC68,
+];
+
+pub const SECAM_COLOR_LUT: [u32; 8] = [
+    0x000000, 0x2121FF, 0xF03C79, 0xFF50FF, 0x7FFF00, 0x7FFFFF, 0xFFFF3F, 0xFFFFFF
+];
+
 #[derive(Copy, Clone, Debug, Default)]
 pub struct CycleCounter {
     pub(crate) osc: usize,
@@ -42,6 +68,11 @@ pub struct Tia {
     vblank: bool,
     wsync: bool,
     
+    colupf: u8,
+    colubk: u8,
+    
+    ctrlpf: u8,
+    
     pf0: u8,
     pf1: u8,
     pf2: u8,
@@ -56,6 +87,11 @@ impl Default for Tia {
         vsync_trigger: false,
         vblank: false,
         wsync: false,
+        
+        colupf: 0,
+        colubk: 0,
+        
+        ctrlpf: 0,
         
         pf0: 0,
         pf1: 0,
@@ -83,30 +119,17 @@ impl Tia {
         
         // === OSC CLOCK === //
         //TODO: TIA stuff here
-        /*let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
-        if self.cycles.scanline < 40 {
-            *pixel = 0x00767676;
-        } else if self.cycles.scanline >= 232 {
-            *pixel = 0x009A9A9A;
-        } else if self.cycles.color_clock >= 68 && self.cycles.scanline >= 40 && self.cycles.scanline < 232 {
-            *pixel = self.fb_color;
-            
-            self.fb_color += 1000;
-            if self.fb_color > 0x00FFFFFF {
-                self.fb_color = 0;
-            }
-        }*/
         if !self.vblank && self.cycles.color_clock >= 68 && bus.tia.cycles.frame_counter > 0 {
-            /*let pixel = &mut self.framebuffer[self.cycles.pixel_index()];
-            *pixel = self.fb_color;
+            let pixel = self.cycles.color_clock - 68;
+            let dot = pixel / 4;
+            let pf_bit = self.pf_lut(dot, self.ctrlpf & 0b1 != 0);
+            let color = self.color_lut(pf_bit);
+            //println!("scan: {}, pixel: {}, dot: {}, pf_bit: {}, color: {:08X}", self.cycles.scanline, pixel, dot, pf_bit, color);
             
-            self.fb_color += 1000;
-            if self.fb_color > 0x00FFFFFF {
-                self.fb_color = 0;
-            }*/
-            self.framebuffer[self.cycles.pixel_index()] = ((self.pf0 as u32) << 16) | ((self.pf1 as u32) << 8) | (self.pf2 as u32);
+            self.framebuffer[self.cycles.pixel_index()] = color;
+            
+            //self.framebuffer[self.cycles.pixel_index()] = ((self.pf0 as u32) << 16) | ((self.pf1 as u32) << 8) | (self.pf2 as u32);
         }
-        
         
         cpu.rdy = !self.wsync;
         
@@ -137,10 +160,64 @@ impl Tia {
             self.vsync_trigger = false;
         }
     }
+    
+    
+    fn pf_lut(&self, dot_index: usize, r: bool) -> u8 {
+        const B7: u8 = 0b10000000;
+        const B6: u8 = 0b01000000;
+        const B5: u8 = 0b00100000;
+        const B4: u8 = 0b00010000;
+        const B3: u8 = 0b00001000;
+        const B2: u8 = 0b00000100;
+        const B1: u8 = 0b00000010;
+        const B0: u8 = 0b00000001;
+        
+        match dot_index {
+            0  => self.pf0 & B4,
+            1  => self.pf0 & B5,
+            2  => self.pf0 & B6,
+            3  => self.pf0 & B7,
+            
+            4  => self.pf1 & B7,
+            5  => self.pf1 & B6,
+            6  => self.pf1 & B5,
+            7  => self.pf1 & B4,
+            8  => self.pf1 & B3,
+            9  => self.pf1 & B2,
+            10 => self.pf1 & B1,
+            11 => self.pf1 & B0,
+            
+            12 => self.pf2 & B0,
+            13 => self.pf2 & B1,
+            14 => self.pf2 & B2,
+            15 => self.pf2 & B3,
+            16 => self.pf2 & B4,
+            17 => self.pf2 & B5,
+            18 => self.pf2 & B6,
+            19 => self.pf2 & B7,
+            
+            20..=39 if r => self.pf_lut((-((dot_index - 19) as isize) + 20) as usize, false),
+            20..=39 => self.pf_lut(dot_index - 20, false),
+            
+            _ => panic!("invalid dot index: {}", dot_index)
+        }
+    }
+    
+    fn color_lut(&self, reg: u8) -> u32 {
+        let colu = if reg != 0 { self.colupf } else { self.colubk };
+        
+        /*if reg != 0 {
+            0x00ABABAB
+        } else {
+            0
+        }*/
+        
+        NTSC_COLOR_LUT[(colu / 2) as usize]
+    }
 }
 impl BusAccessable for Tia {
     fn write(&mut self, addr: u16, data: u8) {
-        println!("TIA Write: {:02X} to {:04X}", data, addr);
+        //println!("TIA Write: {:02X} to {:04X}", data, addr);
         match addr {
             0x00 => {
                 let past = self.vsync;
@@ -155,13 +232,13 @@ impl BusAccessable for Tia {
            /* 0x04 => unimplemented!(),
             0x05 => unimplemented!(),
             0x06 => unimplemented!(),
-            0x07 => unimplemented!(),
-            0x08 => unimplemented!(),
-            0x09 => unimplemented!(),
-            0x0A => unimplemented!(),
-            0x0B => unimplemented!(),
+            0x07 => unimplemented!(),*/
+            0x08 => self.colupf = data & 0b11111110,
+            0x09 => self.colubk = data & 0b11111110,
+            0x0A => self.ctrlpf = data & 0b00110111,
+            /*0x0B => unimplemented!(),
             0x0C => unimplemented!(),*/
-            0x0D => self.pf0 = data,
+            0x0D => self.pf0 = data & 0b11110000,
             0x0E => self.pf1 = data,
             0x0F => self.pf2 = data,
             /*0x10 => unimplemented!(),
@@ -194,13 +271,13 @@ impl BusAccessable for Tia {
             0x2B => unimplemented!(),
             0x2C => (), //TODO*/
             _ => {
-                println!("TIA: Invalid write to {:04X} ({:02X})", addr, data);
+                //println!("TIA: Invalid write to {:04X} ({:02X})", addr, data);
             }
         }
     }
 
     fn read(&mut self, addr: u16) -> u8 {
-        println!("TIA Read from {:04X}", addr);
+        //println!("TIA Read from {:04X}", addr);
         match addr {
             0x30 => unimplemented!(), // CXM0P
             0x31 => unimplemented!(), // CXM1P
@@ -216,7 +293,7 @@ impl BusAccessable for Tia {
             0x3B => unimplemented!(),
             0x3C => 0b10000000, // INPT4 //TODO: Besides normal input handling, it appears this register has other functionality
             0x3D => 0b10000000, // INPT5 //TODO: Besides normal input handling, it appears this register has other functionality
-            _ => panic!("TIA: Invalid read from {:04X}", addr)
+            _ => 0//panic!("TIA: Invalid read from {:04X}", addr)
         }
     }
 }

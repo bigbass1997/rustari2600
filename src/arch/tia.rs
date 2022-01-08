@@ -124,7 +124,6 @@ impl Tia {
             println!("======================= NEW FRAME STARTED =======================");
             println!("=================================================================");
             self.vsync_trigger = false;
-            if self.cycles.frame_counter == 2 { panic!(); }
         }
     }
 }
@@ -199,13 +198,13 @@ impl BusAccessable for Tia {
             0x34 => 0b00000000, // CXM0FB
             0x35 => 0b00000000, // CXM1FB
             0x36 => 0b00000000, // CXBLPF
-            0x37 => unimplemented!(), // CXPPMM
+            0x37 => 0b00000000, // CXPPMM
             0x38 => unimplemented!(),
             0x39 => unimplemented!(),
             0x3A => unimplemented!(),
             0x3B => unimplemented!(),
-            0x3C => unimplemented!(),
-            0x3D => unimplemented!(),
+            0x3C => 0b10000000, // INPT4 //TODO: Besides normal input handling, it appears this register has other functionality
+            0x3D => 0b10000000, // INPT5 //TODO: Besides normal input handling, it appears this register has other functionality
             _ => panic!("TIA: Invalid read from {:04X}", addr)
         }
     }

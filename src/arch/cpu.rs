@@ -662,7 +662,17 @@ fn cpy(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     }
 }
 fn dcp(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
-fn dec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn dec(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = read_modify_write(procedure, cpu, bus) {
+        procedure.tmp0 = procedure.tmp0.wrapping_sub(1);
+        
+        cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
+        cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);
+        bus.write(addr, procedure.tmp0);
+        
+        procedure.done = true;
+    }
+}
 fn dex(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     match procedure.cycle {
         2 => {
@@ -700,7 +710,7 @@ fn eor(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
 }
 fn inc(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     if let Some(addr) = read_modify_write(procedure, cpu, bus) {
-        procedure.tmp0 += 1;
+        procedure.tmp0 = procedure.tmp0.wrapping_add(1);
         
         cpu.status.set(StatusReg::Zero, procedure.tmp0 == 0);
         cpu.status.set(StatusReg::Negative, procedure.tmp0 & 0x80 > 0);

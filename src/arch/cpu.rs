@@ -552,7 +552,18 @@ fn bcs(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
 fn beq(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Zero));
 }
-fn bit(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) { unimplemented!() }
+fn bit(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
+    if let Some(addr) = effective_addr(procedure, cpu, bus) {
+        let tmp = bus.read(addr);
+        
+        cpu.status.set(StatusReg::Zero, tmp & cpu.acc == 0);
+        cpu.status.set(StatusReg::Overflow, tmp & 0x40 > 0);
+        cpu.status.set(StatusReg::Negative, tmp & 0x80 > 0);
+        cpu.prefetch = Some(cpu.fetch(bus));
+        
+        procedure.done = true;
+    }
+}
 fn bmi(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &mut Bus) {
     branch(procedure, cpu, bus, cpu.status.contains(StatusReg::Negative));
 }
@@ -1358,6 +1369,7 @@ fn read_modify_write(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &
             }
         },
         AbsoluteX => {
+            panic!("");
             match procedure.cycle {
                 2 => {
                     procedure.tmp0 = cpu.fetch(bus);
@@ -1376,7 +1388,12 @@ fn read_modify_write(procedure: &mut InstructionProcedure, cpu: &mut Cpu, bus: &
                     procedure.tmp0 = bus.read(procedure.tmp_addr);
                     None
                 },
-                6 => Some(procedure.tmp_addr),
+                //6 => Some(procedure.tmp_addr),
+                6 => {
+                    bus.write(procedure.tmp_addr, procedure.tmp0);
+                    None
+                },
+                7 => Some(procedure.tmp_addr),
                 _ => None
             }
         }

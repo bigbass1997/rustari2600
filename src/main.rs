@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use clap::{App, AppSettings, Arg};
-use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 use crate::arch::Bus;
 use crate::arch::cpu::Cpu;
 use crate::util::InfCell;
@@ -26,7 +26,7 @@ fn main() {
         borderless: false,
         title: true,
         resize: false,
-        scale: Scale::X2,
+        scale: Scale::X4,
         scale_mode: ScaleMode::Stretch,
         topmost: false,
         transparency: false,
@@ -48,7 +48,10 @@ fn main() {
             } else {
                 bus.pia.swchb |= 0b00000001;
             }
-            bus.tia.cycle(&bus_cell);
+            
+            if window.is_key_down(Key::Right) || window.is_key_pressed(Key::Space, KeyRepeat::No) {
+                bus.tia.cycle(&bus_cell);
+            }
             
             if update_window(bus, &mut window) {
                 return;
@@ -64,7 +67,7 @@ fn main() {
 }
 
 fn update_window(bus: &mut Bus, window: &mut Window) -> bool {
-    if bus.tia.cycles.color_clock == 0 && bus.tia.cycles.scanline == 0 {
+    if bus.tia.cycles.color_clock == 0 /*&& bus.tia.cycles.scanline == 0 */{
         window.update_with_buffer(&bus.tia.framebuffer, 228, 262).unwrap();
     }
     

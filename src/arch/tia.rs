@@ -131,6 +131,8 @@ impl Tia {
             //self.framebuffer[self.cycles.pixel_index()] = ((self.pf0 as u32) << 16) | ((self.pf1 as u32) << 8) | (self.pf2 as u32);
         }
         
+        //self.debug_color_clock();
+        
         cpu.rdy = !self.wsync;
         
         if self.cycles.div3 == 0 {
@@ -144,6 +146,7 @@ impl Tia {
             pia.cycle(bus_cell);
         }
         
+        self.debug_playfield();
         
         //println!("FRAME: {}, SCANLINE: {}, HORIZ: {}, INTIM: {:02X}, INTIM_COUNTER: {:04X}, INTERVAL: {} ({})", self.cycles.frame_counter, self.cycles.scanline, self.cycles.color_clock, bus.pia.intim, bus.pia.intim_counter, bus.pia.intim_interval, bus.pia.intim_interval_active);
         self.cycles.osc_cycle();
@@ -153,6 +156,8 @@ impl Tia {
         if self.vsync_trigger && !self.vsync {
             self.cycles.frame_cpu_counter = 0;
             self.cycles.scanline = 0;
+            println!("new frame, color_clock: {}", self.cycles.color_clock);
+            self.cycles.color_clock = 0;
             self.cycles.frame_counter += 1;
             //println!("=================================================================");
             //println!("======================= NEW FRAME STARTED =======================");
@@ -161,6 +166,55 @@ impl Tia {
         }
     }
     
+    fn debug_playfield(&mut self) {
+        let mut j = 0;
+        for i in 4..=7 {
+            let pixel = (250 * 228) + 10 + j;
+            j += 1;
+            
+            if self.pf0 & (1 << i) != 0 {
+                self.framebuffer[pixel] = 0x00FF00;
+            } else {
+                self.framebuffer[pixel] = 0xFF0000;
+            }
+        }
+        j += 1;
+        
+        for i in (0..=7).rev() {
+            let pixel = (250 * 228) + 10 + j;
+            j += 1;
+            
+            if self.pf1 & (1 << i) != 0 {
+                self.framebuffer[pixel] = 0x00FF00;
+            } else {
+                self.framebuffer[pixel] = 0xFF0000;
+            }
+        }
+        j += 1;
+        
+        for i in 0..=7 {
+            let pixel = (250 * 228) + 10 + j;
+            j += 1;
+            
+            if self.pf2 & (1 << i) != 0 {
+                self.framebuffer[pixel] = 0x00FF00;
+            } else {
+                self.framebuffer[pixel] = 0xFF0000;
+            }
+        }
+    }
+    
+    fn debug_color_clock(&mut self) {
+        /*let mut i = (self.cycles.pixel_index() - 1) as isize;
+        if i >= 59736 || i < 0 {
+            i = 59735;
+        }*/
+        let mut i = self.cycles.pixel_index() + 1;
+        if i >= 59736 {
+            i = 0;
+        }
+        self.framebuffer[i as usize] = 0xFFFFFF;
+    }
     
     fn pf_lut(&self, dot_index: usize, r: bool) -> u8 {
         const B7: u8 = 0b10000000;
@@ -226,7 +280,10 @@ impl BusAccessable for Tia {
                     self.vsync_trigger = true;
                 }
             },
-            0x01 => self.vblank = (data & 0b11000010) != 0,
+            0x01 => {
+                self.vblank = (data & 0b00000010) != 0;
+                println!("vblank changed on: scanline: {}, color_clock: {}", self.cycles.scanline, self.cycles.color_clock);
+            },
             0x02 => self.wsync = true,
             0x03 => unimplemented!(),
            /* 0x04 => unimplemented!(),
